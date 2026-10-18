@@ -488,7 +488,16 @@ def export_excel():
 
 @app.route('/health')
 def health():
-    return jsonify({'ok': True, 'model_loaded': _corrector is not None, 'firebase': FIREBASE_READY, 'mongo': otp_collection is not None})
+    return jsonify({
+        'ok': True,
+        'model_loaded': _corrector is not None,
+        'firebase': FIREBASE_READY,
+        'mongo': otp_collection is not None,
+        'has_vocab': HAS_VOCAB,
+        'ai_mnemonics_loaded': len(_AI_MNEMONICS),
+        'vocab_meanings_loaded': len(_VOCAB_MEANINGS),
+        'similar_chars_loaded': len(_SIMILAR_CHARS)
+    })
 
 @app.route('/warmup')
 def warmup():

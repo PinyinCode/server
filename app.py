@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Unified Flask Server (All-in-One, Render Free Tier Optimized):
-1. Chấm điểm tiếng Trung (MacBert + Fallback Levenshtein + Pinyin + Multi-alias errors) -> /check, /test, /warmup, /health
+1. Chấm điểm tiếng Trung (MacBert Corrector + Levenshtein + Pinyin + Multi-alias errors) -> /check, /test, /warmup, /health
 2. Gửi & xác thực OTP qua Gmail OAuth2 + MongoDB -> /api/device/send-otp, /api/device/verify-otp
 3. Xóa tài khoản Firebase Auth & Firestore -> /api/delete-user
 4. Phân tích chi tiết từ vựng / Flashcard -> /analyze, /analyze_batch, /debug
@@ -68,6 +68,9 @@ except Exception as e:
 
 _AI_MNEMONICS = {}
 _AI_MNEMONICS_INDEX = {}
+_AI_MNEMONICS_PATH = None
+_AI_MNEMONICS_MTIME = 0
+_AI_MNEMONICS_LOADED = False
 
 def _find_ai_mnemonics_file():
     here = os.path.dirname(os.path.abspath(__file__))
@@ -100,6 +103,7 @@ def _build_ai_index(data):
 
 def _do_load_ai_mnemonics():
     global _AI_MNEMONICS, _AI_MNEMONICS_INDEX
+    global _AI_MNEMONICS_PATH, _AI_MNEMONICS_MTIME, _AI_MNEMONICS_LOADED
     path = _find_ai_mnemonics_file()
     if not path:
         return False
@@ -110,6 +114,9 @@ def _do_load_ai_mnemonics():
             return False
         _AI_MNEMONICS = data
         _AI_MNEMONICS_INDEX = _build_ai_index(data)
+        _AI_MNEMONICS_PATH = path
+        _AI_MNEMONICS_MTIME = os.path.getmtime(path)
+        _AI_MNEMONICS_LOADED = True
         return True
     except Exception:
         return False
@@ -121,6 +128,8 @@ def get_ai_mnemonic(char):
     return _AI_MNEMONICS_INDEX.get(char, "")
 
 _VOCAB_MEANINGS = {}
+_VOCAB_MEANINGS_PATH = None
+_VOCAB_MEANINGS_MTIME = 0
 
 def _find_vocab_meanings_file():
     here = os.path.dirname(os.path.abspath(__file__))
@@ -138,7 +147,7 @@ def _find_vocab_meanings_file():
     return None
 
 def _do_load_vocab_meanings():
-    global _VOCAB_MEANINGS
+    global _VOCAB_MEANINGS, _VOCAB_MEANINGS_PATH, _VOCAB_MEANINGS_MTIME
     path = _find_vocab_meanings_file()
     if not path:
         return False
@@ -147,6 +156,8 @@ def _do_load_vocab_meanings():
             data = json.load(f)
         if isinstance(data, dict):
             _VOCAB_MEANINGS = data
+            _VOCAB_MEANINGS_PATH = path
+            _VOCAB_MEANINGS_MTIME = os.path.getmtime(path)
             return True
     except Exception:
         pass
@@ -203,7 +214,7 @@ _do_load_vocab_meanings()
 _do_load_similar_chars()
 
 # ==========================================
-# 1. CHỨC NĂNG: CHẤM ĐIỂM TIẾNG TRUNG (MacBert + Levenshtein + Multi-alias)
+# 1. CHỨC NĂNG: CHẤM ĐIỂM TIẾNG TRUNG (Chuẩn nguyên bản + Multi-alias)
 # ==========================================
 _corrector = None
 _corrector_lock = threading.Lock()
@@ -260,6 +271,7 @@ def add_pinyin_to_errors(errors):
     return errors
 
 def find_diff(user, correct):
+    """Tim loi bang Levenshtein. Tra ve ca input_position."""
     u = list(clean(user))
     c = list(clean(correct))
     errors = []
@@ -430,7 +442,7 @@ def test_get():
         return jsonify({
             'error': 'Thieu tham so c',
             'usage': 'Them ?u=cau_user&c=cau_dung',
-            'example': '/test?u=wo&c=ni'
+            'example': '/test?u=wo xi huan chi ping guo&c=wo xi huan chi ping guo'
         })
     return jsonify(grade(u, c))
 
@@ -743,20 +755,17 @@ def debug():
 @app.route('/')
 def index():
     return jsonify({
-        'name': 'Unified Chinese API Server',
-        'version': '4.0-complete',
-        'status': 'running',
+        'name': 'Chinese Grading & Vocab API',
+        'version': '4.1-original-grading',
         'endpoints': {
-            'health': 'GET /health',
-            'warmup': 'GET /warmup',
+            'health': '/health',
+            'warmup': '/warmup',
             'check': 'POST /check',
-            'test': 'GET /test?u=...&c=...',
+            'test': '/test?u=...&c=...',
             'send_otp': 'POST /api/device/send-otp',
             'verify_otp': 'POST /api/device/verify-otp',
             'delete_user': 'POST /api/delete-user',
-            'analyze': 'POST /analyze',
-            'analyze_batch': 'POST /analyze_batch',
-            'debug': 'GET /debug?char=...'
+            'analyze': 'POST /analyze'
         }
     })
 

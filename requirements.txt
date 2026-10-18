@@ -2,13 +2,12 @@ Flask
 Flask-Cors
 pymongo
 firebase-admin
-openpyxl
 fuzzywuzzy
 python-Levenshtein
-pycorrector
 pypinyin
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
 gunicorn
+pycorrector

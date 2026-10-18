@@ -6,5 +6,4 @@ firebase-admin
 pymongo
 google-auth
 google-api-python-client
-pycorrector
 openpyxl

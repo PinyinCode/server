@@ -8,4 +8,6 @@ pycorrector
 transformers
 torch
 firebase-admin
+pymongo
+email-validator
 gunicorn

@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-ALL-IN-ONE API (Python)
-Bao gồm: Chấm điểm, Từ vựng (Vocab), Firebase Delete, và OTP (chuyển từ Node.js).
+FILE TỔNG HỢP TOÀN BỘ HỆ THỐNG (5 IN 1)
+1. app.py: Chấm điểm câu (/check)
+2. vocab_api.py: Phân tích chữ Hán (/analyze)
+3. export_meanings.py: Chạy script xuất Excel (/api/admin/export-excel)
+4. firebase_delete_api.py: Xóa user (/api/delete-user)
+5. server.js: Gửi/Nhận OTP (/api/device/send-otp, /api/device/verify-otp)
 """
 
 from flask import Flask, request, jsonify
@@ -18,12 +22,13 @@ import threading
 import traceback
 from datetime import datetime, timedelta
 
-# Thư viện OTP & Firebase
+# Thư viện cho OTP & Firebase & Excel
 from pymongo import MongoClient
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
+from openpyxl import load_workbook
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -31,59 +36,53 @@ app = Flask(__name__)
 CORS(app)
 
 # ==========================================================
-# PHẦN 1: KHỞI TẠO FIREBASE
+# PHẦN 0: CẤU HÌNH CHUNG
 # ==========================================================
 FIREBASE_READY = False
+mongo_client = None
+otp_collection = None
+last_sent_map = {}
+
+# ==========================================================
+# PHẦN 1: FIREBASE (Từ firebase_delete_api.py)
+# ==========================================================
 try:
     firebase_json_str = os.environ.get("FIREBASE_CREDENTIALS_JSON")
     if firebase_json_str:
         cred = credentials.Certificate(json.loads(firebase_json_str))
         firebase_admin.initialize_app(cred)
         FIREBASE_READY = True
-        print("[API] Firebase init OK (env)")
     elif os.path.exists("serviceAccountKey.json"):
         cred = credentials.Certificate("serviceAccountKey.json")
         firebase_admin.initialize_app(cred)
         FIREBASE_READY = True
-        print("[API] Firebase init OK (file)")
-    else:
-        print("[API] [WARN] Không có Firebase credential — /api/delete-user sẽ lỗi")
 except Exception as e:
-    print("[API] Firebase init failed: " + str(e))
+    print("[API] Firebase init failed:", e)
 
 # ==========================================================
-# PHẦN 2: KHỞI TẠO MONGODB (Cho OTP)
+# PHẦN 2: MONGODB (Từ server.js)
 # ==========================================================
 MONGO_URI = os.environ.get("MONGODB_URI")
-mongo_client = None
-db_mongo = None
-otp_collection = None
-last_sent_map = {}
-
 if MONGO_URI:
     try:
         mongo_client = MongoClient(MONGO_URI)
-        db_mongo = mongo_client["test"]
-        otp_collection = db_mongo["otpcodes"]
-        # Tạo TTL index để tự động xóa OTP sau 10 phút (600 giây)
+        otp_collection = mongo_client["test"]["otpcodes"]
+        # Tạo TTL index tự xóa sau 10 phút
         otp_collection.create_index("createdAt", expireAfterSeconds=600)
-        print("[API] MongoDB init OK (OTP ready)")
+        print("[API] MongoDB init OK")
     except Exception as e:
-        print("[API] MongoDB init failed: " + str(e))
+        print("[API] MongoDB init failed:", e)
 
 # ==========================================================
-# PHẦN 3: SETUP VOCAB (Từ vocab_api.py)
+# PHẦN 3: VOCAB SETUP (Từ vocab_api.py)
 # ==========================================================
 HAS_VOCAB = False
 try:
-    from vocab_data.radical_analyzer import (
-        _split_components, get_radical_for_word
-    )
+    from vocab_data.radical_analyzer import _split_components, get_radical_for_word
     from vocab_data.mnemonic_generator import generate_mnemonic
     HAS_VOCAB = True
-    print("[VocabAPI] vocab_data loaded OK")
 except Exception as e:
-    print("[VocabAPI] vocab_data load failed: " + str(e))
+    print("[VocabAPI] vocab_data load failed:", e)
 
 _AI_MNEMONICS = {}
 _AI_MNEMONICS_INDEX = {}
@@ -92,14 +91,7 @@ _SIMILAR_CHARS = {}
 
 def _find_ai_mnemonics_file():
     here = os.path.dirname(os.path.abspath(__file__))
-    parent = os.path.dirname(here)
-    candidates = [
-        os.path.join(here, "data", "ai_mnemonics.json"),
-        os.path.join(parent, "data", "ai_mnemonics.json"),
-        os.path.join(os.getcwd(), "data", "ai_mnemonics.json"),
-        "data/ai_mnemonics.json", "ai_mnemonics.json",
-    ]
-    for p in candidates:
+    for p in [os.path.join(here, "data", "ai_mnemonics.json"), "data/ai_mnemonics.json"]:
         if os.path.exists(p): return p
     return None
 
@@ -107,8 +99,7 @@ def _build_ai_index(data):
     idx = {}
     for k, v in data.items():
         parts = k.split("|")
-        if len(parts) == 3 and parts[2].strip():
-            idx[parts[2].strip()] = v
+        if len(parts) == 3 and parts[2].strip(): idx[parts[2].strip()] = v
     return idx
 
 def _do_load_ai_mnemonics():
@@ -116,8 +107,7 @@ def _do_load_ai_mnemonics():
     path = _find_ai_mnemonics_file()
     if not path: return False
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            _AI_MNEMONICS = json.load(f)
+        with open(path, "r", encoding="utf-8") as f: _AI_MNEMONICS = json.load(f)
         _AI_MNEMONICS_INDEX = _build_ai_index(_AI_MNEMONICS)
         return True
     except: return False
@@ -137,13 +127,11 @@ def _do_load_vocab_meanings():
     path = _find_vocab_meanings_file()
     if not path: return False
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            _VOCAB_MEANINGS = json.load(f)
+        with open(path, "r", encoding="utf-8") as f: _VOCAB_MEANINGS = json.load(f)
         return True
     except: return False
 
-def get_meaning(char):
-    return _VOCAB_MEANINGS.get(char, "")
+def get_meaning(char): return _VOCAB_MEANINGS.get(char, "")
 
 def _do_load_similar_chars():
     global _SIMILAR_CHARS
@@ -162,8 +150,7 @@ def get_similar_chars(char):
     entry = _SIMILAR_CHARS.get(char)
     if not entry: return [], ""
     if isinstance(entry, list): return [str(c).strip() for c in entry if c], ""
-    if isinstance(entry, dict):
-        return [str(c).strip() for c in entry.get('similar', []) if c], entry.get('diff', '')
+    if isinstance(entry, dict): return [str(c).strip() for c in entry.get('similar', []) if c], entry.get('diff', '')
     return [], ""
 
 _do_load_ai_mnemonics()
@@ -173,8 +160,8 @@ _do_load_similar_chars()
 def get_pinyin_vocab(char):
     if not char: return ''
     try:
-        result = pinyin(char, style=Style.TONE)
-        if result and result[0]: return result[0][0]
+        res = pinyin(char, style=Style.TONE)
+        if res and res[0]: return res[0][0]
     except: pass
     return ''
 
@@ -187,19 +174,10 @@ def analyze_char(char):
         if vi: result['vi'] = vi
         
         main_rad = get_radical_for_word(char)
-        if main_rad:
-            result['radical'] = {
-                'zh': main_rad.get('zh', ''), 'pinyin': main_rad.get('pinyin', ''),
-                'meaning': main_rad.get('meaning', ''), 'strokes': main_rad.get('strokes', 0),
-                'position': main_rad.get('position', '')
-            }
+        if main_rad: result['radical'] = {k: main_rad.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'strokes', 'position']}
         
         comps = _split_components(char)
-        if comps:
-            result['components'] = [{
-                'zh': c.get('zh', ''), 'pinyin': c.get('pinyin', ''),
-                'meaning': c.get('meaning', ''), 'position': c.get('position', '')
-            } for c in comps[:8]]
+        if comps: result['components'] = [{k: c.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'position']} for c in comps[:8]]
 
         mnemonic = get_ai_mnemonic(char) or generate_mnemonic(char)
         if mnemonic: result['mnemonic'] = mnemonic
@@ -211,9 +189,7 @@ def analyze_char(char):
                 'diff': diff_text
             }
         return result
-    except Exception as e:
-        print("[VocabAPI] analyze error:", e)
-        return None
+    except: return None
 
 # ==========================================================
 # PHẦN 4: CHẤM ĐIỂM (Từ app.py)
@@ -233,8 +209,7 @@ def get_corrector():
             from pycorrector import MacBertCorrector
             _corrector = MacBertCorrector("shibing624/macbert4csc-base-chinese")
             return _corrector
-        except Exception as e:
-            print("[API] Load failed:", e)
+        except:
             _corrector_failed = True
             return None
 
@@ -245,8 +220,8 @@ def clean(text):
 def get_pinyin(char):
     if not char: return ''
     try:
-        result = pinyin(char, style=Style.TONE)
-        if result and result[0]: return result[0][0]
+        res = pinyin(char, style=Style.TONE)
+        if res and res[0]: return res[0][0]
     except: pass
     return ''
 
@@ -269,16 +244,15 @@ def find_diff(user, correct):
             else: dp[i][j] = 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
     i, j = m, n
     while i > 0 or j > 0:
-        if i > 0 and j > 0 and u[i-1] == c[j-1]:
-            i -= 1; j -= 1
+        if i > 0 and j > 0 and u[i-1] == c[j-1]: i -= 1; j -= 1
         elif i > 0 and j > 0 and dp[i][j] == dp[i-1][j-1] + 1:
-            errors.append({'type': 'wrong', 'position': j, 'input_position': i - 1, 'user': u[i-1], 'correct': c[j-1]})
+            errors.append({'type': 'wrong', 'position': j, 'input_position': i-1, 'user': u[i-1], 'correct': c[j-1]})
             i -= 1; j -= 1
         elif j > 0 and dp[i][j] == dp[i][j-1] + 1:
             errors.append({'type': 'missing', 'position': j, 'input_position': i, 'correct': c[j-1]})
             j -= 1
         elif i > 0 and dp[i][j] == dp[i-1][j] + 1:
-            errors.append({'type': 'extra', 'position': j, 'input_position': i - 1, 'user': u[i-1]})
+            errors.append({'type': 'extra', 'position': j, 'input_position': i-1, 'user': u[i-1]})
             i -= 1
         else: break
     errors.reverse()
@@ -300,62 +274,36 @@ def grade(user_answer, correct_answer):
                 for e in err_info:
                     pos = e.get('pos', 0)
                     errors.append({'type': 'wrong', 'position': pos, 'input_position': pos, 'user': e.get('orig', ''), 'correct': e.get('correct', '')})
-        except Exception as e: print("[API] Correct error:", e)
+        except: pass
         
     if not errors: errors, _ = find_diff(u, c)
     
     max_len = max(len(u), len(c))
-    distance = len(errors)
-    ratio = 1 - (distance / max_len) if max_len > 0 else 0
-    ratio = max(0, min(1, ratio))
+    ratio = max(0, min(1, 1 - (len(errors) / max_len))) if max_len > 0 else 0
     
     if ratio >= 0.9: status, message = 'correct', 'Đúng (sai nhỏ)'
     elif ratio >= 0.6: status, message = 'partial', 'Gần đúng'
     else: status, message = 'wrong', 'Sai'
     
     add_pinyin_to_errors(errors)
+    return {'score': round(ratio * 100), 'status': status, 'message': message, 'errors': errors, 'suggestion': correct_answer if u != c else None, 'used_ai': used_ai}
+
+# ==========================================================
+# PHẦN 5: OTP GMAIL (Từ server.js)
+# ==========================================================
+def send_gmail_html(to, subject, html):
+    cid, csecret = os.environ.get("GOOGLE_CLIENT_ID"), os.environ.get("GOOGLE_CLIENT_SECRET")
+    rtoken, sender = os.environ.get("GOOGLE_REFRESH_TOKEN"), os.environ.get("GOOGLE_SENDER_EMAIL")
+    if not all([cid, csecret, rtoken, sender]): raise Exception("Thiếu biến môi trường Google OAuth2")
     
-    return {
-        'score': round(ratio * 100), 'status': status, 'message': message,
-        'errors': errors, 'suggestion': correct_answer if u != c else None, 'used_ai': used_ai
-    }
-
-# ==========================================================
-# PHẦN 5: OTP GMAIL (Chuyển từ server.js sang Python)
-# ==========================================================
-def send_gmail_html(to_email, subject, html_content):
-    client_id = os.environ.get("GOOGLE_CLIENT_ID")
-    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
-    refresh_token = os.environ.get("GOOGLE_REFRESH_TOKEN")
-    sender_email = os.environ.get("GOOGLE_SENDER_EMAIL")
-
-    if not all([client_id, client_secret, refresh_token, sender_email]):
-        raise Exception("Thiếu cấu hình Google OAuth2 (Env Vars)")
-
-    creds = Credentials(
-        None, refresh_token=refresh_token, client_id=client_id,
-        client_secret=client_secret, token_uri="https://oauth2.googleapis.com/token"
-    )
+    creds = Credentials(None, refresh_token=rtoken, client_id=cid, client_secret=csecret, token_uri="https://oauth2.googleapis.com/token")
     service = build('gmail', 'v1', credentials=creds)
     
-    # Mã hóa tiêu đề
-    subject_encoded = "=?UTF-8?B?" + base64.b64encode(subject.encode('utf-8')).decode('utf-8') + "?="
+    sub_enc = "=?UTF-8?B?" + base64.b64encode(subject.encode('utf-8')).decode('utf-8') + "?="
+    msg = f'From: "Account Verification" <{sender}>\nTo: {to}\nSubject: {sub_enc}\nMIME-Version: 1.0\nContent-Type: text/html; charset=UTF-8\nContent-Transfer-Encoding: base64\n\n{base64.b64encode(html.encode("utf-8")).decode("utf-8")}'
+    encoded = base64.urlsafe_b64encode(msg.encode("utf-8")).decode("utf-8")
     
-    # Xây dựng message
-    message_parts = [
-        f'From: "Account Verification" <{sender_email}>',
-        f'To: {to_email}',
-        f'Subject: {subject_encoded}',
-        'MIME-Version: 1.0',
-        'Content-Type: text/html; charset=UTF-8',
-        'Content-Transfer-Encoding: base64',
-        '',
-        base64.b64encode(html_content.encode('utf-8')).decode('utf-8')
-    ]
-    raw_message = '\n'.join(message_parts)
-    encoded_message = base64.urlsafe_b64encode(raw_message.encode('utf-8')).decode('utf-8')
-    
-    service.users().messages().send(userId='me', body={'raw': encoded_message}).execute()
+    service.users().messages().send(userId='me', body={'raw': encoded}).execute()
 
 def build_otp_email_html(otp, device_name, email):
     return f"""
@@ -364,200 +312,33 @@ def build_otp_email_html(otp, device_name, email):
             <h1 style="color:#fff;margin:0;font-size:22px">🔐 Xác thực đăng nhập</h1>
         </div>
         <div style="background:#fff;padding:28px 24px;border-radius:0 0 12px 12px">
-            <p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 16px">
-                Có một thiết bị mới đang cố đăng nhập vào tài khoản <b>{email}</b>:
-            </p>
-            <div style="background:#f1f5f9;border-radius:10px;padding:14px 18px;margin-bottom:20px">
-                <div style="font-weight:bold;color:#0f172a;font-size:15px">{device_name or 'Thiết bị'}</div>
-            </div>
-            <p style="color:#475569;font-size:14px;margin:0 0 12px">Nhập mã OTP sau để xác nhận:</p>
+            <p style="color:#475569;font-size:14px;margin:0 0 16px">Thiết bị đang đăng nhập vào tài khoản <b>{email}</b>:</p>
+            <div style="background:#f1f5f9;border-radius:10px;padding:14px 18px;margin-bottom:20px"><b>{device_name}</b></div>
             <div style="text-align:center;margin:24px 0">
                 <div style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:18px 36px;border-radius:12px">
-                    <div style="color:#fff;font-size:36px;font-weight:900;letter-spacing:8px;font-family:monospace">{otp}</div>
+                    <div style="color:#fff;font-size:36px;font-weight:900;letter-spacing:8px;">{otp}</div>
                 </div>
-            </div>
-            <p style="color:#94a3b8;font-size:13px;text-align:center;margin:0">
-                Mã có hiệu lực trong <b>10 phút</b>.
-            </p>
-            <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:12px 16px;border-radius:8px;margin-top:20px">
-                <p style="color:#92400e;font-size:13px;margin:0;line-height:1.5">
-                    ⚠️ Nếu <b>KHÔNG phải bạn</b>, hãy bỏ qua email này và đổi mật khẩu ngay.
-                </p>
             </div>
         </div>
     </div>
     """
 
-@app.route('/api/device/send-otp', methods=['POST'])
-def send_otp():
-    if otp_collection is None:
-        return jsonify({'ok': False, 'error': 'OTP service chưa sẵn sàng (Thiếu MongoDB)'}), 503
-        
-    try:
-        data = request.get_json(force=True, silent=True) or {}
-        email = data.get('email', '')
-        device_id = data.get('deviceId', 'unknown')
-        device_name = data.get('deviceName', 'Thiết bị')
-        
-        if not email or '@' not in email:
-            return jsonify({'ok': False, 'error': 'Email không hợp lệ'}), 400
-            
-        email_lower = email.lower().strip()
-        
-        # Rate limit 60s
-        now = datetime.utcnow()
-        last_sent = last_sent_map.get(email_lower)
-        if last_sent and (now - last_sent).total_seconds() < 60:
-            wait_sec = int(60 - (now - last_sent).total_seconds())
-            return jsonify({'ok': False, 'error': f'Vui lòng đợi {wait_sec} giây trước khi gửi lại', 'waitSec': wait_sec}), 429
-            
-        # Xóa OTP cũ & tạo mới
-        otp_collection.delete_many({'email': email_lower})
-        otp = str(random.randint(100000, 999999))
-        otp_collection.insert_one({
-            'email': email_lower,
-            'otp': otp,
-            'deviceId': device_id,
-            'deviceName': device_name,
-            'attempts': 0,
-            'createdAt': now
-        })
-        
-        # Gửi mail
-        html = build_otp_email_html(otp, device_name, email_lower)
-        send_gmail_html(email_lower, 'Your OTP Verification Code', html)
-        
-        last_sent_map[email_lower] = now
-        print(f"📧 Gửi OTP {otp} đến {email_lower}")
-        return jsonify({'ok': True, 'message': 'Đã gửi mã OTP'})
-        
-    except Exception as e:
-        print("❌ Send OTP error:", e)
-        return jsonify({'ok': False, 'error': str(e)}), 500
-
-@app.route('/api/device/verify-otp', methods=['POST'])
-def verify_otp():
-    if otp_collection is None:
-        return jsonify({'ok': False, 'error': 'OTP service chưa sẵn sàng'}), 503
-
-    try:
-        data = request.get_json(force=True, silent=True) or {}
-        email = data.get('email', '')
-        otp = data.get('otp', '')
-        
-        if not email or not otp:
-            return jsonify({'ok': False, 'error': 'Thiếu email hoặc OTP'}), 400
-            
-        email_lower = email.lower().strip()
-        record = otp_collection.find_one({'email': email_lower}, sort=[('createdAt', -1)])
-        
-        if not record:
-            return jsonify({'ok': False, 'error': 'OTP không tồn tại hoặc đã hết hạn'}), 400
-            
-        # Kiểm tra hết hạn (10 phút) - Đề phòng TTL index chưa chạy kịp
-        if datetime.utcnow() - record['createdAt'] > timedelta(minutes=10):
-            otp_collection.delete_many({'email': email_lower})
-            return jsonify({'ok': False, 'error': 'OTP đã hết hạn'}), 400
-            
-        # Kiểm tra số lần nhập sai
-        if record.get('attempts', 0) >= 5:
-            otp_collection.delete_many({'email': email_lower})
-            return jsonify({'ok': False, 'error': 'Quá nhiều lần thử'}), 429
-            
-        # Kiểm tra OTP
-        if str(record['otp']) != str(otp).strip():
-            otp_collection.update_one({'_id': record['_id']}, {'$inc': {'attempts': 1}})
-            return jsonify({
-                'ok': False, 
-                'error': 'Mã OTP không đúng',
-                'attemptsLeft': 5 - (record.get('attempts', 0) + 1)
-            }), 400
-            
-        # Đúng -> Xóa OTP
-        otp_collection.delete_many({'email': email_lower})
-        print(f"✅ OTP đúng cho {email_lower}")
-        return jsonify({'ok': True, 'message': 'Xác thực thành công'})
-        
-    except Exception as e:
-        print("❌ Verify OTP error:", e)
-        return jsonify({'ok': False, 'error': str(e)}), 500
-
-
 # ==========================================================
-# PHẦN 6: ĐỊNH NGHĨA CÁC ROUTES KHÁC
+# PHẦN 6: ROUTES
 # ==========================================================
 
-@app.route('/')
-def index():
-    return jsonify({'name': 'All-in-one API', 'version': '6.0-python-all'})
-
-@app.route('/health')
-def health():
-    return jsonify({
-        'ok': True, 
-        'model_loaded': _corrector is not None, 
-        'firebase_ready': FIREBASE_READY, 
-        'mongo_ready': otp_collection is not None
-    })
-
-@app.route('/warmup')
-def warmup():
-    get_corrector()
-    return jsonify({'ok': True, 'loaded': _corrector is not None})
-
-@app.route('/check', methods=['POST'])
-def check():
-    try:
-        data = request.get_json(force=True, silent=True) or {}
-        u, c = data.get('user_answer', ''), data.get('correct_answer', '')
-        if not c: return jsonify({'error': 'Missing correct_answer'}), 400
-        return jsonify(grade(u, c))
-    except Exception as e: return jsonify({'error': str(e)}), 500
-
-@app.route('/test')
-def test_get():
-    u, c = request.args.get('u', ''), request.args.get('c', '')
-    if not c:
-        return jsonify({'error': 'Thieu tham so c', 'usage': 'Them ?u=cau_user&c=cau_dung'})
-    return jsonify(grade(u, c))
-
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    try:
-        data = request.get_json(force=True, silent=True) or {}
-        char = data.get('char', '').strip()
-        if not char or len(char) != 1: return jsonify({'ok': False, 'error': 'Invalid char'}), 400
-        res = analyze_char(char)
-        return jsonify({'ok': True, 'data': res}) if res else jsonify({'ok': False, 'error': 'Not found'}), 500
-    except Exception as e: return jsonify({'ok': False, 'error': str(e)}), 500
-
-@app.route('/vocab_test')
-def vocab_test():
-    ch = request.args.get('char', '').strip()
-    res = analyze_char(ch)
-    return jsonify({'ok': True, 'data': res}) if res else jsonify({'ok': False, 'error': 'Not found'}), 500
-
-@app.route('/reload', methods=['POST', 'GET'])
-def reload_ai():
-    _do_load_ai_mnemonics()
-    _do_load_vocab_meanings()
-    return jsonify({'ok': True, 'ai_count': len(_AI_MNEMONICS), 'meanings_count': len(_VOCAB_MEANINGS)})
-
+# --- 1. TỪ FIREBASE_DELETE_API.PY ---
 @app.route('/api/delete-user', methods=['POST'])
 def delete_user():
-    if not FIREBASE_READY:
-        return jsonify({"success": False, "error": "Firebase chưa được cấu hình"}), 503
-
+    if not FIREBASE_READY: return jsonify({"success": False, "error": "Firebase chưa cấu hình"}), 503
     data = request.json or {}
     email = data.get('email')
     if not email: return jsonify({"success": False, "error": "Thiếu email"}), 400
-
     email_clean = email.strip().lower()
     try:
         db = firestore.client()
         deleted_auth = False
-        deleted_firestore = False
-        
+        deleted_fs = False
         try:
             user_record = auth.get_user_by_email(email_clean)
             auth.delete_user(user_record.uid)
@@ -567,16 +348,145 @@ def delete_user():
         doc_ref = db.collection('allowed_users').document(email_clean)
         if doc_ref.get().exists:
             doc_ref.delete()
-            deleted_firestore = True
+            deleted_fs = True
             
-        if not deleted_auth and not deleted_firestore:
-            return jsonify({"success": False, "error": f"Không tìm thấy user {email_clean}"}), 404
-            
+        if not deleted_auth and not deleted_fs: return jsonify({"success": False, "error": f"Không tìm thấy user {email_clean}"}), 404
         return jsonify({"success": True, "message": f"Đã xóa user {email_clean}"})
     except Exception as e:
-        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
+# --- 2. TỪ SERVER.JS (OTP) ---
+@app.route('/api/device/send-otp', methods=['POST'])
+def send_otp():
+    if otp_collection is None: return jsonify({'ok': False, 'error': 'OTP service chưa sẵn sàng'}), 503
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        email, did, dname = data.get('email', ''), data.get('deviceId', 'unknown'), data.get('deviceName', 'Thiết bị')
+        if not email or '@' not in email: return jsonify({'ok': False, 'error': 'Email không hợp lệ'}), 400
+        
+        el = email.lower().strip()
+        now = datetime.utcnow()
+        
+        if el in last_sent_map and (now - last_sent_map[el]).total_seconds() < 60:
+            wait = int(60 - (now - last_sent_map[el]).total_seconds())
+            return jsonify({'ok': False, 'error': f'Vui lòng đợi {wait} giây', 'waitSec': wait}), 429
+            
+        otp_collection.delete_many({'email': el})
+        otp = str(random.randint(100000, 999999))
+        otp_collection.insert_one({'email': el, 'otp': otp, 'deviceId': did, 'deviceName': dname, 'attempts': 0, 'createdAt': now})
+        
+        send_gmail_html(el, 'Your OTP Verification Code', build_otp_email_html(otp, dname, el))
+        last_sent_map[el] = now
+        return jsonify({'ok': True, 'message': 'Đã gửi mã OTP'})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/device/verify-otp', methods=['POST'])
+def verify_otp():
+    if otp_collection is None: return jsonify({'ok': False, 'error': 'OTP service chưa sẵn sàng'}), 503
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        email, otp = data.get('email', ''), data.get('otp', '')
+        if not email or not otp: return jsonify({'ok': False, 'error': 'Thiếu email hoặc OTP'}), 400
+        
+        el = email.lower().strip()
+        record = otp_collection.find_one({'email': el}, sort=[('createdAt', -1)])
+        
+        if not record: return jsonify({'ok': False, 'error': 'OTP không tồn tại hoặc đã hết hạn'}), 400
+        if datetime.utcnow() - record['createdAt'] > timedelta(minutes=10):
+            otp_collection.delete_many({'email': el})
+            return jsonify({'ok': False, 'error': 'OTP đã hết hạn'}), 400
+        if record.get('attempts', 0) >= 5:
+            otp_collection.delete_many({'email': el})
+            return jsonify({'ok': False, 'error': 'Quá nhiều lần thử'}), 429
+            
+        if str(record['otp']) != str(otp).strip():
+            otp_collection.update_one({'_id': record['_id']}, {'$inc': {'attempts': 1}})
+            return jsonify({'ok': False, 'error': 'Mã OTP không đúng', 'attemptsLeft': 5 - (record.get('attempts', 0) + 1)}), 400
+            
+        otp_collection.delete_many({'email': el})
+        return jsonify({'ok': True, 'message': 'Xác thực thành công'})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+# --- 3. TỪ APP.PY (CHẤM ĐIỂM) ---
+@app.route('/check', methods=['POST'])
+def check():
+    data = request.get_json(force=True, silent=True) or {}
+    u, c = data.get('user_answer', ''), data.get('correct_answer', '')
+    if not c: return jsonify({'error': 'Missing correct_answer'}), 400
+    return jsonify(grade(u, c))
+
+@app.route('/test')
+def test_get():
+    u, c = request.args.get('u', ''), request.args.get('c', '')
+    if not c: return jsonify({'error': 'Thieu tham so c', 'usage': 'Them ?u=...&c=...'})
+    return jsonify(grade(u, c))
+
+# --- 4. TỪ VOCAB_API.PY (PHÂN TÍCH) ---
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    data = request.get_json(force=True, silent=True) or {}
+    char = data.get('char', '').strip()
+    if not char or len(char) != 1: return jsonify({'ok': False, 'error': 'Invalid char'}), 400
+    res = analyze_char(char)
+    return jsonify({'ok': True, 'data': res}) if res else jsonify({'ok': False, 'error': 'Not found'}), 500
+
+@app.route('/vocab_test')
+def vocab_test():
+    ch = request.args.get('char', '').strip()
+    res = analyze_char(ch)
+    return jsonify({'ok': True, 'data': res}) if res else jsonify({'ok': False, 'error': 'Not found'}), 500
+
+# --- 5. TỪ EXPORT_MEANINGS.PY (XUẤT EXCEL) ---
+@app.route('/api/admin/export-excel', methods=['GET', 'POST'])
+def export_excel():
+    EXCEL_PATH = "data/tu_vung_hsk.xlsx"
+    OUTPUT_PATH = "data/vocab_meanings.json"
+    
+    if not os.path.exists(EXCEL_PATH):
+        return jsonify({"success": False, "error": f"Không tìm thấy {EXCEL_PATH}"}), 404
+        
+    try:
+        wb = load_workbook(EXCEL_PATH, data_only=True, read_only=True)
+        result = {}
+        for sheet_name in wb.sheetnames:
+            if not sheet_name.upper().startswith("HSK"): continue
+            ws = wb[sheet_name]
+            is_hsk79 = any(x in sheet_name for x in ['7', '8', '9'])
+            col_zh, col_vi = 1, (4 if is_hsk79 else 5)
+            count_sheet = 0
+            
+            for row in ws.iter_rows(min_row=3, values_only=True):
+                if not row or len(row) <= col_vi: continue
+                zh = str(row[col_zh]).strip() if row[col_zh] else ""
+                vi = str(row[col_vi]).strip() if len(row) > col_vi and row[col_vi] else ""
+                if zh and vi and zh not in result:
+                    result[zh] = vi
+                    count_sheet += 1
+        wb.close()
+        
+        with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
+            
+        _do_load_vocab_meanings() # Load lại vào RAM ngay lập tức
+        
+        return jsonify({
+            "success": True, 
+            "message": f"Đã xuất {len(result)} từ vựng",
+            "size_kb": round(os.path.getsize(OUTPUT_PATH) / 1024, 1)
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+# --- HEALTH CHECK & INDEX ---
+@app.route('/health')
+def health():
+    return jsonify({'ok': True, 'model_loaded': _corrector is not None, 'firebase': FIREBASE_READY, 'mongo': otp_collection is not None})
+
+@app.route('/')
+def index():
+    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.0', 'status': 'Running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

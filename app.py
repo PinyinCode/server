@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-FILE TỔNG HỢP TOÀN BỘ HỆ THỐNG (5 IN 1)
-1. app.py: Chấm điểm câu (/check)
-2. vocab_api.py: Phân tích chữ Hán (/analyze)
-3. export_meanings.py: Chạy script xuất Excel (/api/admin/export-excel)
-4. firebase_delete_api.py: Xóa user (/api/delete-user)
-5. server.js: Gửi/Nhận OTP (/api/device/send-otp, /api/device/verify-otp)
+MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - FIX SAFARI CORS)
+Bao gồm: Chấm điểm, Từ vựng, OTP, Firebase Delete, Xuất Excel.
 """
 
 from flask import Flask, request, jsonify
@@ -22,7 +18,7 @@ import threading
 import traceback
 from datetime import datetime, timedelta
 
-# Thư viện cho OTP & Firebase & Excel
+# Thư viện OTP & Firebase & Excel
 from pymongo import MongoClient
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -33,19 +29,30 @@ from openpyxl import load_workbook
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 app = Flask(__name__)
-CORS(app)
 
 # ==========================================================
-# PHẦN 0: CẤU HÌNH CHUNG
+# CẤU HÌNH CORS TỐI ĐA (DÀNH RIÊNG CHO SAFARI/IOS)
+# ==========================================================
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+        "allow_headers": ["Content-Type", "Authorization", "Accept", "Origin", "X-Requested-With", "X-CSRF-Token"]
+    }
+})
+
+# Bắt buộc phải có hàm này để Safari chấp nhận request POST kèm JSON
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,Origin,X-Requested-With')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PUT,DELETE')
+    return response
+
+# ==========================================================
+# PHẦN 1: KHỞI TẠO FIREBASE
 # ==========================================================
 FIREBASE_READY = False
-mongo_client = None
-otp_collection = None
-last_sent_map = {}
-
-# ==========================================================
-# PHẦN 1: FIREBASE (Từ firebase_delete_api.py)
-# ==========================================================
 try:
     firebase_json_str = os.environ.get("FIREBASE_CREDENTIALS_JSON")
     if firebase_json_str:
@@ -60,21 +67,24 @@ except Exception as e:
     print("[API] Firebase init failed:", e)
 
 # ==========================================================
-# PHẦN 2: MONGODB (Từ server.js)
+# PHẦN 2: KHỞI TẠO MONGODB (OTP)
 # ==========================================================
 MONGO_URI = os.environ.get("MONGODB_URI")
+mongo_client = None
+otp_collection = None
+last_sent_map = {}
+
 if MONGO_URI:
     try:
-        mongo_client = MongoClient(MONGO_URI)
+        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         otp_collection = mongo_client["test"]["otpcodes"]
-        # Tạo TTL index tự xóa sau 10 phút
         otp_collection.create_index("createdAt", expireAfterSeconds=600)
         print("[API] MongoDB init OK")
     except Exception as e:
         print("[API] MongoDB init failed:", e)
 
 # ==========================================================
-# PHẦN 3: VOCAB SETUP (Từ vocab_api.py)
+# PHẦN 3: VOCAB SETUP
 # ==========================================================
 HAS_VOCAB = False
 try:
@@ -192,7 +202,7 @@ def analyze_char(char):
     except: return None
 
 # ==========================================================
-# PHẦN 4: CHẤM ĐIỂM (Từ app.py)
+# PHẦN 4: CHẤM ĐIỂM
 # ==========================================================
 _corrector = None
 _corrector_lock = threading.Lock()
@@ -209,7 +219,7 @@ def get_corrector():
             from pycorrector import MacBertCorrector
             _corrector = MacBertCorrector("shibing624/macbert4csc-base-chinese")
             return _corrector
-        except:
+        except Exception:
             _corrector_failed = True
             return None
 
@@ -289,7 +299,7 @@ def grade(user_answer, correct_answer):
     return {'score': round(ratio * 100), 'status': status, 'message': message, 'errors': errors, 'suggestion': correct_answer if u != c else None, 'used_ai': used_ai}
 
 # ==========================================================
-# PHẦN 5: OTP GMAIL (Từ server.js)
+# PHẦN 5: OTP GMAIL
 # ==========================================================
 def send_gmail_html(to, subject, html):
     cid, csecret = os.environ.get("GOOGLE_CLIENT_ID"), os.environ.get("GOOGLE_CLIENT_SECRET")
@@ -327,7 +337,6 @@ def build_otp_email_html(otp, device_name, email):
 # PHẦN 6: ROUTES
 # ==========================================================
 
-# --- 1. TỪ FIREBASE_DELETE_API.PY ---
 @app.route('/api/delete-user', methods=['POST'])
 def delete_user():
     if not FIREBASE_READY: return jsonify({"success": False, "error": "Firebase chưa cấu hình"}), 503
@@ -337,8 +346,7 @@ def delete_user():
     email_clean = email.strip().lower()
     try:
         db = firestore.client()
-        deleted_auth = False
-        deleted_fs = False
+        deleted_auth, deleted_fs = False, False
         try:
             user_record = auth.get_user_by_email(email_clean)
             auth.delete_user(user_record.uid)
@@ -355,7 +363,6 @@ def delete_user():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-# --- 2. TỪ SERVER.JS (OTP) ---
 @app.route('/api/device/send-otp', methods=['POST'])
 def send_otp():
     if otp_collection is None: return jsonify({'ok': False, 'error': 'OTP service chưa sẵn sàng'}), 503
@@ -409,13 +416,17 @@ def verify_otp():
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
-# --- 3. TỪ APP.PY (CHẤM ĐIỂM) ---
-@app.route('/check', methods=['POST'])
+@app.route('/check', methods=['POST', 'OPTIONS'])
 def check():
-    data = request.get_json(force=True, silent=True) or {}
-    u, c = data.get('user_answer', ''), data.get('correct_answer', '')
-    if not c: return jsonify({'error': 'Missing correct_answer'}), 400
-    return jsonify(grade(u, c))
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        u, c = data.get('user_answer', ''), data.get('correct_answer', '')
+        if not c: return jsonify({'error': 'Missing correct_answer'}), 400
+        return jsonify(grade(u, c))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/test')
 def test_get():
@@ -423,14 +434,18 @@ def test_get():
     if not c: return jsonify({'error': 'Thieu tham so c', 'usage': 'Them ?u=...&c=...'})
     return jsonify(grade(u, c))
 
-# --- 4. TỪ VOCAB_API.PY (PHÂN TÍCH) ---
-@app.route('/analyze', methods=['POST'])
+@app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze():
-    data = request.get_json(force=True, silent=True) or {}
-    char = data.get('char', '').strip()
-    if not char or len(char) != 1: return jsonify({'ok': False, 'error': 'Invalid char'}), 400
-    res = analyze_char(char)
-    return jsonify({'ok': True, 'data': res}) if res else jsonify({'ok': False, 'error': 'Not found'}), 500
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        char = data.get('char', '').strip()
+        if not char or len(char) != 1: return jsonify({'ok': False, 'error': 'Invalid char'}), 400
+        res = analyze_char(char)
+        return jsonify({'ok': True, 'data': res}) if res else jsonify({'ok': False, 'error': 'Not found'}), 500
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 @app.route('/vocab_test')
 def vocab_test():
@@ -438,7 +453,6 @@ def vocab_test():
     res = analyze_char(ch)
     return jsonify({'ok': True, 'data': res}) if res else jsonify({'ok': False, 'error': 'Not found'}), 500
 
-# --- 5. TỪ EXPORT_MEANINGS.PY (XUẤT EXCEL) ---
 @app.route('/api/admin/export-excel', methods=['GET', 'POST'])
 def export_excel():
     EXCEL_PATH = "data/tu_vung_hsk.xlsx"
@@ -455,7 +469,6 @@ def export_excel():
             ws = wb[sheet_name]
             is_hsk79 = any(x in sheet_name for x in ['7', '8', '9'])
             col_zh, col_vi = 1, (4 if is_hsk79 else 5)
-            count_sheet = 0
             
             for row in ws.iter_rows(min_row=3, values_only=True):
                 if not row or len(row) <= col_vi: continue
@@ -463,30 +476,28 @@ def export_excel():
                 vi = str(row[col_vi]).strip() if len(row) > col_vi and row[col_vi] else ""
                 if zh and vi and zh not in result:
                     result[zh] = vi
-                    count_sheet += 1
         wb.close()
         
         with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
             
-        _do_load_vocab_meanings() # Load lại vào RAM ngay lập tức
-        
-        return jsonify({
-            "success": True, 
-            "message": f"Đã xuất {len(result)} từ vựng",
-            "size_kb": round(os.path.getsize(OUTPUT_PATH) / 1024, 1)
-        })
+        _do_load_vocab_meanings()
+        return jsonify({"success": True, "message": f"Đã xuất {len(result)} từ vựng"})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-# --- HEALTH CHECK & INDEX ---
 @app.route('/health')
 def health():
     return jsonify({'ok': True, 'model_loaded': _corrector is not None, 'firebase': FIREBASE_READY, 'mongo': otp_collection is not None})
 
+@app.route('/warmup')
+def warmup():
+    get_corrector()
+    return jsonify({'ok': True, 'loaded': _corrector is not None})
+
 @app.route('/')
 def index():
-    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.0', 'status': 'Running'})
+    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.2-NoCORS', 'status': 'Running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

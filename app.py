@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Unified Flask Server (All-in-One):
-1. Chấm điểm tiếng Trung (MacBert + Pinyin + Diff) -> /check, /test, /warmup, /health
+Unified Flask Server (All-in-One, Lightweight):
+1. Chấm điểm tiếng Trung (Levenshtein + Pinyin + Diff) -> /check, /test, /warmup, /health
 2. Gửi & xác thực OTP qua Gmail OAuth2 + MongoDB -> /api/device/send-otp, /api/device/verify-otp
 3. Xóa tài khoản Firebase Auth & Firestore -> /api/delete-user
 4. Phân tích chi tiết từ vựng / Flashcard -> /analyze, /analyze_batch, /debug
@@ -22,7 +22,6 @@ from fuzzywuzzy import fuzz
 from pypinyin import pinyin, Style
 import re
 
-# Đảm bảo đường dẫn module hiện tại được ưu tiên
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # --- GOOGLE GMAIL OAUTH2 SETUP ---
@@ -71,7 +70,6 @@ except Exception as e:
 _AI_MNEMONICS = {}
 _AI_MNEMONICS_INDEX = {}
 _AI_MNEMONICS_PATH = None
-_AI_MNEMONICS_MTIME = 0
 _AI_MNEMONICS_LOADED = False
 
 def _find_ai_mnemonics_file():
@@ -104,31 +102,21 @@ def _build_ai_index(data):
     return idx
 
 def _do_load_ai_mnemonics():
-    global _AI_MNEMONICS, _AI_MNEMONICS_INDEX
-    global _AI_MNEMONICS_PATH, _AI_MNEMONICS_MTIME, _AI_MNEMONICS_LOADED
-
+    global _AI_MNEMONICS, _AI_MNEMONICS_INDEX, _AI_MNEMONICS_PATH, _AI_MNEMONICS_LOADED
     path = _find_ai_mnemonics_file()
     if not path:
-        _AI_MNEMONICS = {}
-        _AI_MNEMONICS_INDEX = {}
-        _AI_MNEMONICS_PATH = None
-        _AI_MNEMONICS_MTIME = 0
-        _AI_MNEMONICS_LOADED = True
         return False
-
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
             return False
-
         _AI_MNEMONICS = data
         _AI_MNEMONICS_INDEX = _build_ai_index(data)
         _AI_MNEMONICS_PATH = path
-        _AI_MNEMONICS_MTIME = os.path.getmtime(path)
         _AI_MNEMONICS_LOADED = True
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 def get_ai_mnemonic(char):
@@ -141,7 +129,6 @@ def get_ai_mnemonic(char):
 
 _VOCAB_MEANINGS = {}
 _VOCAB_MEANINGS_PATH = None
-_VOCAB_MEANINGS_MTIME = 0
 
 def _find_vocab_meanings_file():
     here = os.path.dirname(os.path.abspath(__file__))
@@ -159,7 +146,7 @@ def _find_vocab_meanings_file():
     return None
 
 def _do_load_vocab_meanings():
-    global _VOCAB_MEANINGS, _VOCAB_MEANINGS_PATH, _VOCAB_MEANINGS_MTIME
+    global _VOCAB_MEANINGS, _VOCAB_MEANINGS_PATH
     path = _find_vocab_meanings_file()
     if not path:
         return False
@@ -169,7 +156,6 @@ def _do_load_vocab_meanings():
         if isinstance(data, dict):
             _VOCAB_MEANINGS = data
             _VOCAB_MEANINGS_PATH = path
-            _VOCAB_MEANINGS_MTIME = os.path.getmtime(path)
             return True
     except Exception:
         pass
@@ -187,13 +173,11 @@ def _do_load_similar_chars():
     global _SIMILAR_CHARS, _SIMILAR_CHARS_LOADED
     if _SIMILAR_CHARS_LOADED:
         return
-
     here = os.path.dirname(os.path.abspath(__file__))
     folder = os.path.join(here, "vocab_data")
     if not os.path.isdir(folder):
         _SIMILAR_CHARS_LOADED = True
         return
-
     for fname in sorted(os.listdir(folder)):
         if fname.startswith("similar_chars") and fname.endswith(".json"):
             path = os.path.join(folder, fname)
@@ -223,43 +207,13 @@ def get_similar_chars(char):
 app = Flask(__name__)
 CORS(app)
 
-# Khởi tạo dữ liệu từ vựng lúc khởi động server
 _do_load_ai_mnemonics()
 _do_load_vocab_meanings()
 _do_load_similar_chars()
 
-
 # ==========================================
-# 1. CHỨC NĂNG: CHẤM ĐIỂM TIẾNG TRUNG (MacBert)
+# 1. CHỨC NĂNG: CHẤM ĐIỂM TIẾNG TRUNG (Thuần thuật toán & Pinyin siêu nhẹ)
 # ==========================================
-_corrector = None
-_corrector_lock = threading.Lock()
-_corrector_failed = False
-
-def get_corrector():
-    global _corrector, _corrector_failed
-    if _corrector is not None:
-        return _corrector
-    if _corrector_failed:
-        return None
-
-    with _corrector_lock:
-        if _corrector is not None:
-            return _corrector
-        if _corrector_failed:
-            return None
-
-        try:
-            print("[API] Loading pycorrector...")
-            from pycorrector import MacBertCorrector
-            _corrector = MacBertCorrector("shibing624/macbert4csc-base-chinese")
-            print("[API] Loaded OK")
-            return _corrector
-        except Exception as e:
-            print("[API] Load failed: " + str(e))
-            _corrector_failed = True
-            return None
-
 def clean(text):
     if not text:
         return ''
@@ -363,28 +317,7 @@ def grade(user_answer, correct_answer):
             'used_ai': False
         }
 
-    errors = []
-    used_ai = False
-    corrector = get_corrector()
-    if corrector:
-        try:
-            corrected, err_info = corrector.correct(u)
-            if err_info:
-                used_ai = True
-                for e in err_info:
-                    pos = e.get('pos', 0)
-                    errors.append({
-                        'type': 'wrong',
-                        'position': pos,
-                        'input_position': pos,
-                        'user': e.get('orig', ''),
-                        'correct': e.get('correct', '')
-                    })
-        except Exception as e:
-            print("[API] Correct error: " + str(e))
-
-    if not errors:
-        errors, _ = find_diff(u, c)
+    errors, _ = find_diff(u, c)
 
     max_len = max(len(u), len(c))
     distance = len(errors)
@@ -406,15 +339,13 @@ def grade(user_answer, correct_answer):
         'message': message,
         'errors': errors,
         'suggestion': correct_answer if u != c else None,
-        'used_ai': used_ai
+        'used_ai': False
     }
 
 @app.route('/health')
 def health():
     return jsonify({
         'ok': True,
-        'model_loaded': _corrector is not None,
-        'model_failed': _corrector_failed,
         'has_vocab': HAS_VOCAB,
         'ai_mnemonics_loaded': len(_AI_MNEMONICS),
         'vocab_meanings_loaded': len(_VOCAB_MEANINGS),
@@ -422,8 +353,7 @@ def health():
 
 @app.route('/warmup')
 def warmup():
-    get_corrector()
-    return jsonify({'ok': True, 'loaded': _corrector is not None})
+    return jsonify({'ok': True, 'loaded': True})
 
 @app.route('/check', methods=['POST'])
 def check():
@@ -766,7 +696,7 @@ def debug():
 def index():
     return jsonify({
         'status': 'running',
-        'message': 'Unified Python Flask Server (4 trong 1) hoạt động hoàn hảo!',
+        'message': 'Unified Python Flask Server (Lightweight) hoạt động hoàn hảo!',
         'endpoints': {
             'health': 'GET /health',
             'warmup': 'GET /warmup',

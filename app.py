@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Unified Flask Server (All-in-One, Lightweight):
-1. Chấm điểm tiếng Trung (Levenshtein + Pinyin + Diff) -> /check, /test, /warmup, /health
+Unified Flask Server (All-in-One, Original Grading Logic Preserved):
+1. Chấm điểm tiếng Trung (MacBert Corrector + Fallback Levenshtein + Pinyin) -> /check, /test, /warmup, /health
 2. Gửi & xác thực OTP qua Gmail OAuth2 + MongoDB -> /api/device/send-otp, /api/device/verify-otp
 3. Xóa tài khoản Firebase Auth & Firestore -> /api/delete-user
 4. Phân tích chi tiết từ vựng / Flashcard -> /analyze, /analyze_batch, /debug
@@ -10,15 +10,14 @@ Unified Flask Server (All-in-One, Lightweight):
 import os
 import json
 import traceback
-import threading
 import random
 import base64
 import sys
+import threading
 from math import ceil
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from fuzzywuzzy import fuzz
 from pypinyin import pinyin, Style
 import re
 
@@ -55,7 +54,7 @@ db_mongo = mongo_client["test"] if mongo_client else None
 otp_collection = db_mongo["otpcodes"] if db_mongo is not None else None
 last_sent_map = {}
 
-# --- VOCAB ANALYSIS SETUP ---
+# --- VOCAB ANALYSIS & FLASHCARD SETUP ---
 HAS_VOCAB = False
 try:
     from vocab_data.radical_analyzer import (
@@ -69,8 +68,6 @@ except Exception as e:
 
 _AI_MNEMONICS = {}
 _AI_MNEMONICS_INDEX = {}
-_AI_MNEMONICS_PATH = None
-_AI_MNEMONICS_LOADED = False
 
 def _find_ai_mnemonics_file():
     here = os.path.dirname(os.path.abspath(__file__))
@@ -102,7 +99,7 @@ def _build_ai_index(data):
     return idx
 
 def _do_load_ai_mnemonics():
-    global _AI_MNEMONICS, _AI_MNEMONICS_INDEX, _AI_MNEMONICS_PATH, _AI_MNEMONICS_LOADED
+    global _AI_MNEMONICS, _AI_MNEMONICS_INDEX
     path = _find_ai_mnemonics_file()
     if not path:
         return False
@@ -113,22 +110,17 @@ def _do_load_ai_mnemonics():
             return False
         _AI_MNEMONICS = data
         _AI_MNEMONICS_INDEX = _build_ai_index(data)
-        _AI_MNEMONICS_PATH = path
-        _AI_MNEMONICS_LOADED = True
         return True
     except Exception:
         return False
 
 def get_ai_mnemonic(char):
-    if not _AI_MNEMONICS_LOADED:
-        _do_load_ai_mnemonics()
     if not _AI_MNEMONICS_INDEX:
-        return ""
+        _do_load_ai_mnemonics()
     char = str(char or "").strip()
     return _AI_MNEMONICS_INDEX.get(char, "")
 
 _VOCAB_MEANINGS = {}
-_VOCAB_MEANINGS_PATH = None
 
 def _find_vocab_meanings_file():
     here = os.path.dirname(os.path.abspath(__file__))
@@ -146,7 +138,7 @@ def _find_vocab_meanings_file():
     return None
 
 def _do_load_vocab_meanings():
-    global _VOCAB_MEANINGS, _VOCAB_MEANINGS_PATH
+    global _VOCAB_MEANINGS
     path = _find_vocab_meanings_file()
     if not path:
         return False
@@ -155,7 +147,6 @@ def _do_load_vocab_meanings():
             data = json.load(f)
         if isinstance(data, dict):
             _VOCAB_MEANINGS = data
-            _VOCAB_MEANINGS_PATH = path
             return True
     except Exception:
         pass
@@ -212,14 +203,43 @@ _do_load_vocab_meanings()
 _do_load_similar_chars()
 
 # ==========================================
-# 1. CHỨC NĂNG: CHẤM ĐIỂM TIẾNG TRUNG (Thuần thuật toán & Pinyin siêu nhẹ)
+# 1. CHỨC NĂNG: CHẤM ĐIỂM TIẾNG TRUNG (Đúng nguyên bản 100%)
 # ==========================================
+_corrector = None
+_corrector_lock = threading.Lock()
+_corrector_failed = False
+
+def get_corrector():
+    global _corrector, _corrector_failed
+
+    if _corrector is not None:
+        return _corrector
+    if _corrector_failed:
+        return None
+
+    with _corrector_lock:
+        if _corrector is not None:
+            return _corrector
+        if _corrector_failed:
+            return None
+
+        try:
+            print("[API] Loading pycorrector...")
+            from pycorrector import MacBertCorrector
+            _corrector = MacBertCorrector("shibing624/macbert4csc-base-chinese")
+            print("[API] Loaded OK")
+            return _corrector
+        except Exception as e:
+            print("[API] Load failed: " + str(e))
+            _corrector_failed = True
+            return None
+
 def clean(text):
     if not text:
         return ''
     return re.sub(r'[。，！？、；：""''「」『』（）《》〈〉【】〔〕\s]+', '', str(text))
 
-def get_pinyin_char(char):
+def get_pinyin(char):
     if not char:
         return ''
     try:
@@ -233,12 +253,13 @@ def get_pinyin_char(char):
 def add_pinyin_to_errors(errors):
     for e in errors:
         if e.get('user'):
-            e['user_pinyin'] = get_pinyin_char(e['user'])
+            e['user_pinyin'] = get_pinyin(e['user'])
         if e.get('correct'):
-            e['correct_pinyin'] = get_pinyin_char(e['correct'])
+            e['correct_pinyin'] = get_pinyin(e['correct'])
     return errors
 
 def find_diff(user, correct):
+    """Tim loi bang Levenshtein. Tra ve ca input_position."""
     u = list(clean(user))
     c = list(clean(correct))
     errors = []
@@ -317,7 +338,28 @@ def grade(user_answer, correct_answer):
             'used_ai': False
         }
 
-    errors, _ = find_diff(u, c)
+    errors = []
+    used_ai = False
+    corrector = get_corrector()
+    if corrector:
+        try:
+            corrected, err_info = corrector.correct(u)
+            if err_info:
+                used_ai = True
+                for e in err_info:
+                    pos = e.get('pos', 0)
+                    errors.append({
+                        'type': 'wrong',
+                        'position': pos,
+                        'input_position': pos,
+                        'user': e.get('orig', ''),
+                        'correct': e.get('correct', '')
+                    })
+        except Exception as e:
+            print("[API] Correct error: " + str(e))
+
+    if not errors:
+        errors, _ = find_diff(u, c)
 
     max_len = max(len(u), len(c))
     distance = len(errors)
@@ -339,21 +381,22 @@ def grade(user_answer, correct_answer):
         'message': message,
         'errors': errors,
         'suggestion': correct_answer if u != c else None,
-        'used_ai': False
+        'used_ai': used_ai
     }
 
 @app.route('/health')
 def health():
     return jsonify({
         'ok': True,
-        'has_vocab': HAS_VOCAB,
-        'ai_mnemonics_loaded': len(_AI_MNEMONICS),
-        'vocab_meanings_loaded': len(_VOCAB_MEANINGS),
+        'model_loaded': _corrector is not None,
+        'model_failed': _corrector_failed,
+        'has_vocab': HAS_VOCAB
     })
 
 @app.route('/warmup')
 def warmup():
-    return jsonify({'ok': True, 'loaded': True})
+    get_corrector()
+    return jsonify({'ok': True, 'loaded': _corrector is not None})
 
 @app.route('/check', methods=['POST'])
 def check():
@@ -374,7 +417,8 @@ def test_get():
     if not c:
         return jsonify({
             'error': 'Thieu tham so c',
-            'usage': 'Them ?u=cau_user&c=cau_dung'
+            'usage': 'Them ?u=cau_user&c=cau_dung',
+            'example': '/test?u=wo xi huan chi ping guo&c=wo xi huan chi ping guo'
         })
     return jsonify(grade(u, c))
 
@@ -439,11 +483,6 @@ def build_otp_email_html(otp, device_name, email):
             <p style="color:#94a3b8;font-size:13px;text-align:center;margin:0">
                 Mã có hiệu lực trong <b>10 phút</b>.
             </p>
-            <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:12px 16px;border-radius:8px;margin-top:20px">
-                <p style="color:#92400e;font-size:13px;margin:0;line-height:1.5">
-                    ⚠️ Nếu <b>KHÔNG phải bạn</b>, hãy bỏ qua email này và đổi mật khẩu ngay.
-                </p>
-            </div>
         </div>
     </div>
     """
@@ -572,7 +611,7 @@ def delete_user():
 
 
 # ==========================================
-# 4. CHỨC NĂNG: PHÂN TÍCH TỪ VỰNG & FLASHCARD (/analyze, /debug)
+# 4. CHỨC NĂNG: PHÂN TÍCH TỪ VỰNG & FLASHCARD
 # ==========================================
 def analyze_char(char):
     if not char or len(char) != 1:
@@ -582,7 +621,7 @@ def analyze_char(char):
     if not HAS_VOCAB:
         return None
     try:
-        result = {'char': char, 'pinyin': get_pinyin_char(char)}
+        result = {'char': char, 'pinyin': get_pinyin(char)}
         vi = get_meaning(char)
         if vi:
             result['vi'] = vi
@@ -623,7 +662,7 @@ def analyze_char(char):
                 c_vi = get_meaning(c)
                 similar_full.append({
                     'char': c,
-                    'pinyin': get_pinyin_char(c),
+                    'pinyin': get_pinyin(c),
                     'meaning': c_vi,
                     'breakdown': '',
                 })
@@ -689,27 +728,23 @@ def debug():
         return jsonify({'error': str(e)}), 500
 
 
-# ==========================================
-# HOME ENDPOINT
-# ==========================================
 @app.route('/')
 def index():
     return jsonify({
-        'status': 'running',
-        'message': 'Unified Python Flask Server (Lightweight) hoạt động hoàn hảo!',
+        'name': 'Chinese Grading API',
+        'version': '3.2-input-position',
         'endpoints': {
-            'health': 'GET /health',
-            'warmup': 'GET /warmup',
-            'check_api': 'POST /check',
-            'test_api': 'GET /test?u=...&c=...',
+            'health': '/health',
+            'warmup': '/warmup',
+            'check': 'POST /check',
+            'test': '/test?u=...&c=...',
             'send_otp': 'POST /api/device/send-otp',
             'verify_otp': 'POST /api/device/verify-otp',
             'delete_user': 'POST /api/delete-user',
-            'analyze': 'POST /analyze { "char": "爱" }',
-            'analyze_batch': 'POST /analyze_batch { "chars": ["爱", "你"] }',
-            'debug': 'GET /debug?char=爱'
+            'analyze': 'POST /analyze'
         }
     })
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

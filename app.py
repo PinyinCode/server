@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Unified Flask Server - Tích hợp toàn bộ 4 chức năng:
+Unified Flask Server - Tích hợp hoàn chỉnh 4 trong 1:
 1. Chấm điểm tiếng Trung (/check, /test, /warmup)
 2. Xử lý từ vựng tiếng Trung từ Excel sang JSON (/generate-vocab)
-3. Gửi & xác thực OTP qua Gmail + MongoDB (/api/device/send-otp, /api/device/verify-otp)
+3. Gửi & xác thực OTP qua Gmail OAuth2 + MongoDB (/api/device/send-otp, /api/device/verify-otp)
 4. Xóa tài khoản Firebase Auth & Firestore (/api/delete-user)
 """
 
@@ -12,6 +12,7 @@ import json
 import traceback
 import threading
 import random
+import base64
 from math import ceil
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
@@ -20,6 +21,10 @@ from fuzzywuzzy import fuzz
 from pypinyin import pinyin, Style
 import re
 from openpyxl import load_workbook
+
+# --- GOOGLE GMAIL OAUTH2 SETUP ---
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 
 # --- FIREBASE SETUP ---
 import firebase_admin
@@ -51,6 +56,80 @@ last_sent_map = {}
 app = Flask(__name__)
 CORS(app)
 
+
+# ==========================================
+# GMAIL OAUTH2 HELper FUNCTION
+# ==========================================
+def send_gmail_oauth2(to_email, subject, html_content):
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    refresh_token = os.environ.get("GOOGLE_REFRESH_TOKEN")
+    sender_email = os.environ.get("GOOGLE_SENDER_EMAIL")
+
+    if not all([client_id, client_secret, refresh_token, sender_email]):
+        raise Exception("Thiếu thông tin cấu hình Google OAuth2 trong biến môi trường!")
+
+    creds = Credentials(
+        None,
+        refresh_token=refresh_token,
+        client_id=client_id,
+        client_secret=client_secret,
+        token_uri="https://oauth2.googleapis.com/token"
+    )
+
+    service = build('gmail', 'v1', credentials=creds)
+
+    # Encode subject chuẩn UTF-8 base64
+    subject_encoded = "=?UTF-8?B?" + base64.b64encode(subject.encode('utf-8')).decode('utf-8') + "?="
+    
+    message_parts = [
+        f'From: "Account Verification" <{sender_email}>',
+        f'To: {to_email}',
+        f'Subject: {subject_encoded}',
+        'MIME-Version: 1.0',
+        'Content-Type: text/html; charset=UTF-8',
+        'Content-Transfer-Encoding: base64',
+        '',
+        base64.b64encode(html_content.encode('utf-8')).decode('utf-8')
+    ]
+    raw_message = '\n'.join(message_parts)
+    encoded_message = base64.urlsafe_b64encode(raw_message.encode('utf-8')).decode('utf-8')
+
+    service.users().messages().send(userId='me', body={'raw': encoded_message}).execute()
+
+
+def build_otp_email_html(otp, device_name, email):
+    return f"""
+    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;background:#f8fafc;padding:20px;border-radius:12px">
+        <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:24px;border-radius:12px 12px 0 0;text-align:center">
+            <h1 style="color:#fff;margin:0;font-size:22px">🔐 Xác thực đăng nhập</h1>
+        </div>
+        <div style="background:#fff;padding:28px 24px;border-radius:0 0 12px 12px">
+            <p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 16px">
+                Có một thiết bị mới đang cố đăng nhập vào tài khoản <b>{email}</b>:
+            </p>
+            <div style="background:#f1f5f9;border-radius:10px;padding:14px 18px;margin-bottom:20px">
+                <div style="font-weight:bold;color:#0f172a;font-size:15px">{device_name or 'Thiết bị'}</div>
+            </div>
+            <p style="color:#475569;font-size:14px;margin:0 0 12px">Nhập mã OTP sau để xác nhận:</p>
+            <div style="text-align:center;margin:24px 0">
+                <div style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:18px 36px;border-radius:12px">
+                    <div style="color:#fff;font-size:36px;font-weight:900;letter-spacing:8px;font-family:monospace">{otp}</div>
+                </div>
+            </div>
+            <p style="color:#94a3b8;font-size:13px;text-align:center;margin:0">
+                Mã có hiệu lực trong <b>10 phút</b>.
+            </p>
+            <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:12px 16px;border-radius:8px;margin-top:20px">
+                <p style="color:#92400e;font-size:13px;margin:0;line-height:1.5">
+                    ⚠️ Nếu <b>KHÔNG phải bạn</b>, hãy bỏ qua email này và đổi mật khẩu ngay.
+                </p>
+            </div>
+        </div>
+    </div>
+    """
+
+
 # ==========================================
 # 1. CHỨC NĂNG: TỪ VỰNG TIẾNG TRUNG (Excel to JSON)
 # ==========================================
@@ -74,7 +153,6 @@ def generate_vocab():
             is_hsk79 = any(x in sheet_name for x in ['7', '8', '9'])
             col_zh = 1
             col_vi = 4 if is_hsk79 else 5
-            count_sheet = 0
             for row in ws.iter_rows(min_row=3, values_only=True):
                 if not row or len(row) <= col_vi:
                     continue
@@ -82,7 +160,6 @@ def generate_vocab():
                 vi = str(row[col_vi]).strip() if len(row) > col_vi and row[col_vi] else ""
                 if zh and vi and zh not in result:
                     result[zh] = vi
-                    count_sheet += 1
 
         wb.close()
 
@@ -104,17 +181,12 @@ _corrector_failed = False
 
 def get_corrector():
     global _corrector, _corrector_failed
-    if _corrector is not None:
-        return _corrector
-    if _corrector_failed:
-        return None
+    if _corrector is not None: return _corrector
+    if _corrector_failed: return None
 
     with _corrector_lock:
-        if _corrector is not None:
-            return _corrector
-        if _corrector_failed:
-            return None
-
+        if _corrector is not None: return _corrector
+        if _corrector_failed: return None
         try:
             print("[API] Loading pycorrector...")
             from pycorrector import MacBertCorrector
@@ -127,44 +199,34 @@ def get_corrector():
             return None
 
 def clean_text(text):
-    if not text:
-        return ''
+    if not text: return ''
     return re.sub(r'[。，！？、；：""''「」『』（）《》〈〉【】〔〕\s]+', '', str(text))
 
 def get_pinyin(char):
-    if not char:
-        return ''
+    if not char: return ''
     try:
         res = pinyin(char, style=Style.TONE)
-        if res and res[0]:
-            return res[0][0]
-    except Exception:
-        pass
+        if res and res[0]: return res[0][0]
+    except Exception: pass
     return ''
 
 def add_pinyin_to_errors(errors):
     for e in errors:
-        if e.get('user'):
-            e['user_pinyin'] = get_pinyin(e['user'])
-        if e.get('correct'):
-            e['correct_pinyin'] = get_pinyin(e['correct'])
+        if e.get('user'): e['user_pinyin'] = get_pinyin(e['user'])
+        if e.get('correct'): e['correct_pinyin'] = get_pinyin(e['correct'])
     return errors
 
 def find_diff(user, correct):
-    u = list(clean_text(user))
-    c = list(clean_text(correct))
-    errors = []
-    m, n = len(u), len(c)
+    u, c = list(clean_text(user)), list(clean_text(correct))
+    errors, m, n = [], len(u), len(c)
     dp = [[0] * (n + 1) for _ in range(m + 1)]
     for i in range(m + 1): dp[i][0] = i
     for j in range(n + 1): dp[0][j] = j
 
     for i in range(1, m + 1):
         for j in range(1, n + 1):
-            if u[i-1] == c[j-1]:
-                dp[i][j] = dp[i-1][j-1]
-            else:
-                dp[i][j] = 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+            if u[i-1] == c[j-1]: dp[i][j] = dp[i-1][j-1]
+            else: dp[i][j] = 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
 
     i, j = m, n
     while i > 0 or j > 0:
@@ -179,23 +241,16 @@ def find_diff(user, correct):
         elif i > 0 and dp[i][j] == dp[i-1][j] + 1:
             errors.append({'type': 'extra', 'position': j, 'input_position': i - 1, 'user': u[i-1]})
             i -= 1
-        else:
-            break
+        else: break
     errors.reverse()
     return errors, dp[m][n]
 
 def grade(user_answer, correct_answer):
-    u = clean_text(user_answer)
-    c = clean_text(correct_answer)
+    u, c = clean_text(user_answer), clean_text(correct_answer)
+    if not u: return {'score': 0, 'status': 'empty', 'message': 'Bạn chưa gõ gì cả', 'errors': [], 'suggestion': correct_answer, 'used_ai': False}
+    if u == c: return {'score': 100, 'status': 'correct', 'message': 'Đúng hoàn toàn', 'errors': [], 'suggestion': None, 'used_ai': False}
 
-    if not u:
-        return {'score': 0, 'status': 'empty', 'message': 'Bạn chưa gõ gì cả', 'errors': [], 'suggestion': correct_answer, 'used_ai': False}
-
-    if u == c:
-        return {'score': 100, 'status': 'correct', 'message': 'Đúng hoàn toàn', 'errors': [], 'suggestion': None, 'used_ai': False}
-
-    errors = []
-    used_ai = False
+    errors, used_ai = [], False
     corrector = get_corrector()
     if corrector:
         try:
@@ -208,11 +263,9 @@ def grade(user_answer, correct_answer):
         except Exception as e:
             print("[API] Correct error: " + str(e))
 
-    if not errors:
-        errors, _ = find_diff(u, c)
+    if not errors: errors, _ = find_diff(u, c)
 
-    max_len = max(len(u), len(c))
-    distance = len(errors)
+    max_len, distance = max(len(u), len(c)), len(errors)
     ratio = max(0, min(1, 1 - (distance / max_len))) if max_len > 0 else 0
 
     if ratio >= 0.9: status, message = 'correct', 'Đúng (sai nhỏ)'
@@ -235,8 +288,7 @@ def warmup():
 def check():
     try:
         data = request.get_json(force=True, silent=True) or {}
-        u = data.get('user_answer', '')
-        c = data.get('correct_answer', '')
+        u, c = data.get('user_answer', ''), data.get('correct_answer', '')
         if not c: return jsonify({'error': 'Missing correct_answer'}), 400
         return jsonify(grade(u, c))
     except Exception as e:
@@ -244,14 +296,13 @@ def check():
 
 @app.route('/test')
 def test_get():
-    u = request.args.get('u', '')
-    c = request.args.get('c', '')
+    u, c = request.args.get('u', ''), request.args.get('c', '')
     if not c: return jsonify({'error': 'Thieu tham so c', 'usage': 'Them ?u=cau_user&c=cau_dung'})
     return jsonify(grade(u, c))
 
 
 # ==========================================
-# 3. CHỨC NĂNG: GẠN LỌC & GỬI GMAIL OTP
+# 3. CHỨC NĂNG: GỬI & XÁC THỰC GMAIL OTP QUA OAUTH2
 # ==========================================
 def generate_otp():
     return str(random.randint(100000, 999999))
@@ -280,6 +331,16 @@ def send_otp():
             otp_collection.delete_many({'email': email_lower})
 
         otp = generate_otp()
+        
+        # Gửi mail thực tế bằng Gmail OAuth2
+        try:
+            html = build_otp_emailHtml(otp, device_name, email_lower) if 'build_otp_emailHtml' in globals() else build_otp_email_html(otp, device_name, email_lower)
+            send_gmail_oauth2(email_lower, 'Your OTP Verification Code', html)
+            print(f"📧 [OTP] Đã gửi OAuth2 mail thành công tới {email_lower}")
+        except Exception as mail_err:
+            print(f"⚠️ Lỗi gửi mail OAuth2: {mail_err}")
+            return jsonify({'ok': False, 'error': f'Không thể gửi email: {str(mail_err)}'}), 500
+
         record = {
             'email': email_lower,
             'otp': otp,
@@ -293,7 +354,6 @@ def send_otp():
             otp_collection.insert_one(record)
 
         last_sent_map[email_lower] = now
-        print(f"📧 [OTP] Đã tạo mã {otp} cho {email_lower}")
         return jsonify({'ok': True, 'message': 'Đã gửi mã OTP'})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -302,19 +362,16 @@ def send_otp():
 def verify_otp():
     try:
         data = request.get_json(force=True, silent=True) or {}
-        email = data.get('email', '')
-        otp = data.get('otp', '')
+        email, otp = data.get('email', ''), data.get('otp', '')
 
         if not email or not otp:
             return jsonify({'ok': False, 'error': 'Thiếu email hoặc OTP'}), 400
 
         email_lower = email.lower().strip()
-        
         if otp_collection is None:
             return jsonify({'ok': False, 'error': 'Database chưa sẵn sàng'}), 500
 
         record = otp_collection.find_one({'email': email_lower}, sort=[('createdAt', -1)])
-
         if not record:
             return jsonify({'ok': False, 'error': 'OTP không tồn tại hoặc đã hết hạn'}), 400
 
@@ -343,23 +400,18 @@ def verify_otp():
 def delete_user():
     data = request.json or {}
     email = data.get('email')
+    if not email: return jsonify({"success": False, "error": "Thiếu thông tin email"}), 400
     
-    if not email:
-        return jsonify({"success": False, "error": "Thiếu thông tin email"}), 400
-        
     email_clean = email.strip().lower()
-    
     try:
         db_fs = firestore.client()
-        deleted_auth = False
-        deleted_firestore = False
+        deleted_auth, deleted_firestore = False, False
         
         try:
             user_record = auth.get_user_by_email(email_clean)
             auth.delete_user(user_record.uid)
             deleted_auth = True
-        except firebase_admin.auth.UserNotFoundError:
-            pass
+        except firebase_admin.auth.UserNotFoundError: pass
             
         doc_ref = db_fs.collection('allowed_users').document(email_clean)
         if doc_ref.get().exists:
@@ -385,7 +437,7 @@ def delete_user():
 def index():
     return jsonify({
         'status': 'running',
-        'message': 'Unified Flask Server (4 trong 1) đang hoạt động!',
+        'message': 'Unified Python Flask Server (4 trong 1) chạy hoàn hảo!',
         'endpoints': {
             'health': '/health',
             'warmup': '/warmup',

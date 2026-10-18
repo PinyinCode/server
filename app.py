@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Unified Flask Server (All-in-One, Original Grading Logic Preserved):
-1. Chấm điểm tiếng Trung (MacBert Corrector + Fallback Levenshtein + Pinyin) -> /check, /test, /warmup, /health
+Unified Flask Server (All-in-One, Render Free Tier Optimized):
+1. Chấm điểm tiếng Trung (MacBert + Fallback Levenshtein + Pinyin + Multi-alias errors) -> /check, /test, /warmup, /health
 2. Gửi & xác thực OTP qua Gmail OAuth2 + MongoDB -> /api/device/send-otp, /api/device/verify-otp
 3. Xóa tài khoản Firebase Auth & Firestore -> /api/delete-user
 4. Phân tích chi tiết từ vựng / Flashcard -> /analyze, /analyze_batch, /debug
@@ -203,7 +203,7 @@ _do_load_vocab_meanings()
 _do_load_similar_chars()
 
 # ==========================================
-# 1. CHỨC NĂNG: CHẤM ĐIỂM TIẾNG TRUNG (Đúng nguyên bản 100%)
+# 1. CHỨC NĂNG: CHẤM ĐIỂM TIẾNG TRUNG (MacBert + Levenshtein + Multi-alias)
 # ==========================================
 _corrector = None
 _corrector_lock = threading.Lock()
@@ -254,12 +254,12 @@ def add_pinyin_to_errors(errors):
     for e in errors:
         if e.get('user'):
             e['user_pinyin'] = get_pinyin(e['user'])
-        if e.get('correct'):
-            e['correct_pinyin'] = get_pinyin(e['correct'])
+        c_char = e.get('correct') or e.get('expected') or e.get('char')
+        if c_char:
+            e['correct_pinyin'] = get_pinyin(c_char)
     return errors
 
 def find_diff(user, correct):
-    """Tim loi bang Levenshtein. Tra ve ca input_position."""
     u = list(clean(user))
     c = list(clean(correct))
     errors = []
@@ -283,29 +283,37 @@ def find_diff(user, correct):
             i -= 1
             j -= 1
         elif i > 0 and j > 0 and dp[i][j] == dp[i-1][j-1] + 1:
+            err_char = c[j-1]
+            err_user = u[i-1]
             errors.append({
                 'type': 'wrong',
                 'position': j,
                 'input_position': i - 1,
-                'user': u[i-1],
-                'correct': c[j-1]
+                'user': err_user,
+                'correct': err_char,
+                'expected': err_char,
+                'char': err_char
             })
             i -= 1
             j -= 1
         elif j > 0 and dp[i][j] == dp[i][j-1] + 1:
+            err_char = c[j-1]
             errors.append({
                 'type': 'missing',
                 'position': j,
                 'input_position': i,
-                'correct': c[j-1]
+                'correct': err_char,
+                'expected': err_char,
+                'char': err_char
             })
             j -= 1
         elif i > 0 and dp[i][j] == dp[i-1][j] + 1:
+            err_user = u[i-1]
             errors.append({
                 'type': 'extra',
                 'position': j,
                 'input_position': i - 1,
-                'user': u[i-1]
+                'user': err_user
             })
             i -= 1
         else:
@@ -348,12 +356,16 @@ def grade(user_answer, correct_answer):
                 used_ai = True
                 for e in err_info:
                     pos = e.get('pos', 0)
+                    c_char = e.get('correct', '')
+                    orig_char = e.get('orig', '')
                     errors.append({
                         'type': 'wrong',
                         'position': pos,
                         'input_position': pos,
-                        'user': e.get('orig', ''),
-                        'correct': e.get('correct', '')
+                        'user': orig_char,
+                        'correct': c_char,
+                        'expected': c_char,
+                        'char': c_char
                     })
         except Exception as e:
             print("[API] Correct error: " + str(e))
@@ -418,7 +430,7 @@ def test_get():
         return jsonify({
             'error': 'Thieu tham so c',
             'usage': 'Them ?u=cau_user&c=cau_dung',
-            'example': '/test?u=wo xi huan chi ping guo&c=wo xi huan chi ping guo'
+            'example': '/test?u=wo&c=ni'
         })
     return jsonify(grade(u, c))
 
@@ -731,17 +743,20 @@ def debug():
 @app.route('/')
 def index():
     return jsonify({
-        'name': 'Chinese Grading API',
-        'version': '3.2-input-position',
+        'name': 'Unified Chinese API Server',
+        'version': '4.0-complete',
+        'status': 'running',
         'endpoints': {
-            'health': '/health',
-            'warmup': '/warmup',
+            'health': 'GET /health',
+            'warmup': 'GET /warmup',
             'check': 'POST /check',
-            'test': '/test?u=...&c=...',
+            'test': 'GET /test?u=...&c=...',
             'send_otp': 'POST /api/device/send-otp',
             'verify_otp': 'POST /api/device/verify-otp',
             'delete_user': 'POST /api/delete-user',
-            'analyze': 'POST /analyze'
+            'analyze': 'POST /analyze',
+            'analyze_batch': 'POST /analyze_batch',
+            'debug': 'GET /debug?char=...'
         }
     })
 

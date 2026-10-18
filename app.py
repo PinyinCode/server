@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Unified Flask Server - Tích hợp:
-1. Trang chủ / Health check
-2. Xử lý từ vựng tiếng Trung (Tự động chạy hoặc chạy qua endpoint /generate-vocab)
-3. API Chấm điểm tiếng Trung (/check, /test, /warmup)
-4. API Xóa tài khoản Firebase (/api/delete-user)
+Unified Flask Server - Tích hợp toàn bộ 4 chức năng:
+1. Chấm điểm tiếng Trung (/check, /test, /warmup)
+2. Xử lý từ vựng tiếng Trung từ Excel sang JSON (/generate-vocab)
+3. Gửi & xác thực OTP qua Gmail + MongoDB (/api/device/send-otp, /api/device/verify-otp)
+4. Xóa tài khoản Firebase Auth & Firestore (/api/delete-user)
 """
 
 import os
 import json
 import traceback
 import threading
+import random
+from math import ceil
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from fuzzywuzzy import fuzz
@@ -24,9 +27,12 @@ from firebase_admin import credentials, auth, firestore
 
 firebase_json_str = os.environ.get("FIREBASE_CREDENTIALS_JSON")
 if firebase_json_str:
-    cred_dict = json.loads(firebase_json_str)
-    cred = credentials.Certificate(cred_dict)
-    firebase_admin.initialize_app(cred)
+    try:
+        cred_dict = json.loads(firebase_json_str)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+    except Exception as e:
+        print(f"⚠️ Lỗi khởi tạo Firebase từ biến môi trường: {e}")
 else:
     if os.path.exists("serviceAccountKey.json"):
         cred = credentials.Certificate("serviceAccountKey.json")
@@ -34,11 +40,19 @@ else:
     else:
         print("⚠️ Cảnh báo: Chưa cấu hình thông tin xác thực Firebase Admin SDK!")
 
+# --- MONGODB SETUP CHO OTP ---
+from pymongo import MongoClient
+MONGO_URI = os.environ.get("MONGODB_URI")
+mongo_client = MongoClient(MONGO_URI) if MONGO_URI else None
+db_mongo = mongo_client["test"] if mongo_client else None
+otp_collection = db_mongo["otpcodes"] if db_mongo is not None else None
+last_sent_map = {}
+
 app = Flask(__name__)
 CORS(app)
 
 # ==========================================
-# PHẦN 1: TỪ VỰNG TIẾNG TRUNG (Excel to JSON)
+# 1. CHỨC NĂNG: TỪ VỰNG TIẾNG TRUNG (Excel to JSON)
 # ==========================================
 @app.route('/generate-vocab', methods=['GET', 'POST'])
 def generate_vocab():
@@ -82,7 +96,7 @@ def generate_vocab():
 
 
 # ==========================================
-# PHẦN 2: CHẤM ĐIỂM TIẾNG TRUNG (MacBert)
+# 2. CHỨC NĂNG: CHẤM ĐIỂM TIẾNG TRUNG (MacBert)
 # ==========================================
 _corrector = None
 _corrector_lock = threading.Lock()
@@ -237,7 +251,93 @@ def test_get():
 
 
 # ==========================================
-# PHẦN 3: XÓA TÀI KHOẢN FIREBASE
+# 3. CHỨC NĂNG: GẠN LỌC & GỬI GMAIL OTP
+# ==========================================
+def generate_otp():
+    return str(random.randint(100000, 999999))
+
+@app.route('/api/device/send-otp', methods=['POST'])
+def send_otp():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        email = data.get('email', '')
+        device_id = data.get('deviceId', 'unknown')
+        device_name = data.get('deviceName', 'Thiết bị')
+
+        if not email or '@' not in email:
+            return jsonify({'ok': False, 'error': 'Email không hợp lệ'}), 400
+
+        email_lower = email.lower().strip()
+
+        # Rate limit 60 giây
+        now = datetime.utcnow().timestamp() * 1000
+        last_sent = last_sent_map.get(email_lower, 0)
+        if now - last_sent < 60000:
+            wait_sec = int(ceil((60000 - (now - last_sent)) / 1000))
+            return jsonify({'ok': False, 'error': f'Vui lòng đợi {wait_sec} giây trước khi gửi lại'}), 429
+
+        if otp_collection is not None:
+            otp_collection.delete_many({'email': email_lower})
+
+        otp = generate_otp()
+        record = {
+            'email': email_lower,
+            'otp': otp,
+            'deviceId': device_id,
+            'deviceName': device_name,
+            'attempts': 0,
+            'createdAt': datetime.utcnow()
+        }
+        
+        if otp_collection is not None:
+            otp_collection.insert_one(record)
+
+        last_sent_map[email_lower] = now
+        print(f"📧 [OTP] Đã tạo mã {otp} cho {email_lower}")
+        return jsonify({'ok': True, 'message': 'Đã gửi mã OTP'})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/device/verify-otp', methods=['POST'])
+def verify_otp():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        email = data.get('email', '')
+        otp = data.get('otp', '')
+
+        if not email or not otp:
+            return jsonify({'ok': False, 'error': 'Thiếu email hoặc OTP'}), 400
+
+        email_lower = email.lower().strip()
+        
+        if otp_collection is None:
+            return jsonify({'ok': False, 'error': 'Database chưa sẵn sàng'}), 500
+
+        record = otp_collection.find_one({'email': email_lower}, sort=[('createdAt', -1)])
+
+        if not record:
+            return jsonify({'ok': False, 'error': 'OTP không tồn tại hoặc đã hết hạn'}), 400
+
+        if datetime.utcnow() - record['createdAt'] > timedelta(minutes=10):
+            otp_collection.delete_many({'email': email_lower})
+            return jsonify({'ok': False, 'error': 'OTP đã hết hạn'}), 400
+
+        if record.get('attempts', 0) >= 5:
+            otp_collection.delete_many({'email': email_lower})
+            return jsonify({'ok': False, 'error': 'Quá nhiều lần thử'}), 429
+
+        if str(record['otp']) != str(otp).strip():
+            otp_collection.update_one({'_id': record['_id']}, {'$inc': {'attempts': 1}})
+            return jsonify({'ok': False, 'error': 'Mã OTP không đúng', 'attemptsLeft': 5 - (record.get('attempts', 0) + 1)}), 400
+
+        otp_collection.delete_many({'email': email_lower})
+        return jsonify({'ok': True, 'message': 'Xác thực thành công'})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# ==========================================
+# 4. CHỨC NĂNG: XÓA TÀI KHOẢN FIREBASE
 # ==========================================
 @app.route('/api/delete-user', methods=['POST'])
 def delete_user():
@@ -250,7 +350,7 @@ def delete_user():
     email_clean = email.strip().lower()
     
     try:
-        db = firestore.client()
+        db_fs = firestore.client()
         deleted_auth = False
         deleted_firestore = False
         
@@ -261,7 +361,7 @@ def delete_user():
         except firebase_admin.auth.UserNotFoundError:
             pass
             
-        doc_ref = db.collection('allowed_users').document(email_clean)
+        doc_ref = db_fs.collection('allowed_users').document(email_clean)
         if doc_ref.get().exists:
             doc_ref.delete()
             deleted_firestore = True
@@ -285,13 +385,15 @@ def delete_user():
 def index():
     return jsonify({
         'status': 'running',
-        'message': 'Unified Flask Server đang hoạt động!',
+        'message': 'Unified Flask Server (4 trong 1) đang hoạt động!',
         'endpoints': {
             'health': '/health',
             'warmup': '/warmup',
             'check_api': 'POST /check',
             'test_api': 'GET /test?u=...&c=...',
             'generate_vocab': '/generate-vocab',
+            'send_otp': 'POST /api/device/send-otp',
+            'verify_otp': 'POST /api/device/verify-otp',
             'delete_user': 'POST /api/delete-user'
         }
     })

@@ -366,12 +366,19 @@ def build_otp_email_html(otp, device_name, email):
 # PHẦN 6: ROUTES
 # ==========================================================
 
-@app.route('/api/delete-user', methods=['POST'])
+@app.route('/api/delete-user', methods=['POST', 'OPTIONS'])
 def delete_user():
-    if not FIREBASE_READY: return jsonify({"success": False, "error": "Firebase chưa cấu hình"}), 503
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+        
+    if not FIREBASE_READY: 
+        return jsonify({"success": False, "error": "Firebase chưa cấu hình"}), 503
+        
     data = request.json or {}
     email = data.get('email')
-    if not email: return jsonify({"success": False, "error": "Thiếu email"}), 400
+    if not email: 
+        return jsonify({"success": False, "error": "Thiếu email"}), 400
+        
     email_clean = email.strip().lower()
     try:
         db = firestore.client()
@@ -380,25 +387,36 @@ def delete_user():
             user_record = auth.get_user_by_email(email_clean)
             auth.delete_user(user_record.uid)
             deleted_auth = True
-        except firebase_admin.auth.UserNotFoundError: pass
+        except firebase_admin.auth.UserNotFoundError: 
+            pass
             
         doc_ref = db.collection('allowed_users').document(email_clean)
         if doc_ref.get().exists:
             doc_ref.delete()
             deleted_fs = True
             
-        if not deleted_auth and not deleted_fs: return jsonify({"success": False, "error": f"Không tìm thấy user {email_clean}"}), 404
+        if not deleted_auth and not deleted_fs: 
+            return jsonify({"success": False, "error": f"Không tìm thấy user {email_clean}"}), 404
+            
         return jsonify({"success": True, "message": f"Đã xóa user {email_clean}"})
     except Exception as e:
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/api/device/send-otp', methods=['POST'])
+
+@app.route('/api/device/send-otp', methods=['POST', 'OPTIONS'])
 def send_otp():
-    if otp_collection is None: return jsonify({'ok': False, 'error': 'OTP service chưa sẵn sàng'}), 503
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+        
+    if otp_collection is None: 
+        return jsonify({'ok': False, 'error': 'OTP service chưa sẵn sàng'}), 503
+        
     try:
         data = request.get_json(force=True, silent=True) or {}
         email, did, dname = data.get('email', ''), data.get('deviceId', 'unknown'), data.get('deviceName', 'Thiết bị')
-        if not email or '@' not in email: return jsonify({'ok': False, 'error': 'Email không hợp lệ'}), 400
+        if not email or '@' not in email: 
+            return jsonify({'ok': False, 'error': 'Email không hợp lệ'}), 400
         
         el = email.lower().strip()
         now = datetime.utcnow()

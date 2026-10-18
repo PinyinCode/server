@@ -178,28 +178,57 @@ def get_pinyin_vocab(char):
 def analyze_char(char):
     if not char or len(char) != 1 or not ('\u4e00' <= char <= '\u9fff') or not HAS_VOCAB:
         return None
+        
     try:
         result = {'char': char, 'pinyin': get_pinyin_vocab(char)}
-        vi = get_meaning(char)
-        if vi: result['vi'] = vi
         
-        main_rad = get_radical_for_word(char)
-        if main_rad: result['radical'] = {k: main_rad.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'strokes', 'position']}
+        # 1. Lấy nghĩa tiếng Việt
+        try:
+            vi = get_meaning(char)
+            if vi: result['vi'] = vi
+        except Exception as e:
+            print(f"[Analyze] get_meaning error '{char}': {e}")
         
-        comps = _split_components(char)
-        if comps: result['components'] = [{k: c.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'position']} for c in comps[:8]]
+        # 2. Lấy bộ thủ
+        try:
+            main_rad = get_radical_for_word(char)
+            if main_rad: 
+                result['radical'] = {k: main_rad.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'strokes', 'position']}
+        except Exception as e:
+            print(f"[Analyze] get_radical error '{char}': {e}")
+        
+        # 3. Phân tích các thành phần cấu tạo
+        try:
+            comps = _split_components(char)
+            if comps: 
+                result['components'] = [{k: c.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'position']} for c in comps[:8]]
+        except Exception as e:
+            print(f"[Analyze] split_components error '{char}': {e}")
 
-        mnemonic = get_ai_mnemonic(char) or generate_mnemonic(char)
-        if mnemonic: result['mnemonic'] = mnemonic
+        # 4. Lấy mẹo nhớ (ưu tiên AI, sau đó đến tĩnh)
+        try:
+            mnemonic = get_ai_mnemonic(char) or generate_mnemonic(char)
+            if mnemonic: result['mnemonic'] = mnemonic
+        except Exception as e:
+            print(f"[Analyze] mnemonic error '{char}': {e}")
         
-        sim_chars, diff_text = get_similar_chars(char)
-        if sim_chars:
-            result['similar'] = {
-                'list': [{'char': c, 'pinyin': get_pinyin_vocab(c), 'meaning': get_meaning(c)} for c in sim_chars if len(c)==1],
-                'diff': diff_text
-            }
+        # 5. Lấy các chữ dễ nhầm
+        try:
+            sim_chars, diff_text = get_similar_chars(char)
+            if sim_chars:
+                result['similar'] = {
+                    'list': [{'char': c, 'pinyin': get_pinyin_vocab(c), 'meaning': get_meaning(c)} for c in sim_chars if len(c)==1],
+                    'diff': diff_text
+                }
+        except Exception as e:
+            print(f"[Analyze] similar_chars error '{char}': {e}")
+            
         return result
-    except: return None
+        
+    except Exception as e:
+        # Nếu có lỗi cực kỳ nghiêm trọng, vẫn trả về dữ liệu cơ bản nhất
+        print(f"[Analyze] CRITICAL error '{char}': {e}")
+        return {'char': char, 'pinyin': get_pinyin_vocab(char)}
 
 # ==========================================================
 # PHẦN 4: CHẤM ĐIỂM
@@ -441,11 +470,21 @@ def analyze():
     try:
         data = request.get_json(force=True, silent=True) or {}
         char = data.get('char', '').strip()
-        if not char or len(char) != 1: return jsonify({'ok': False, 'error': 'Invalid char'}), 400
+        if not char or len(char) != 1: 
+            return jsonify({'ok': False, 'error': 'Invalid char'}), 400
+            
         res = analyze_char(char)
-        return jsonify({'ok': True, 'data': res}) if res else jsonify({'ok': False, 'error': 'Not found'}), 500
+        
+        if res:
+            return jsonify({'ok': True, 'data': res})
+        else:
+            # Trả về mã 200 thay vì 500 để Frontend không báo lỗi kết nối
+            return jsonify({'ok': False, 'error': 'Not found', 'char': char}), 200
+            
     except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+        print(f"[API /analyze] Lỗi: {e}")
+        # Trả về mã 200 kèm thông báo lỗi
+        return jsonify({'ok': False, 'error': str(e), 'char': char}), 200
 
 @app.route('/vocab_test')
 def vocab_test():

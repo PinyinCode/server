@@ -626,7 +626,7 @@ def translate():
         return jsonify({"error": str(e)}), 500
 
 # ==========================================================
-# PHẦN 8: LỊCH SỬ DỊCH (GIỚI HẠN 100 LƯỢT READ & 100 LƯỢT SAVE/NGÀY)
+# PHẦN 8: LỊCH SỬ DỊCH (KIỂM TRA QUYỀN CHÍNH XÁC & GIỚI HẠN 100 LƯỢT)
 # ==========================================================
 @app.route('/api/history', methods=['POST', 'GET', 'OPTIONS'])
 def history_api():
@@ -647,27 +647,32 @@ def history_api():
     history_ref = db.collection('translation_history')
     user_ref = db.collection('allowed_users').document(email_clean)
     
-    # Lấy thông tin user để kiểm tra Phân quyền & Giới hạn Read
+    # ⭐ KIỂM TRA QUYỀN CHÍNH XÁC TỪ FIRESTORE
     user_doc = user_ref.get()
-    user_data = user_doc.to_dict() if user_doc.exists else {}
+    user_role = 'user'
     
-    user_role = str(user_data.get('role') or user_data.get('tier') or 'user').strip().lower()
-    is_admin = (user_role in ['admin', 'super_admin', 'super-admin']) or (email_clean == 'esp32.hotro@gmail.com')
+    if user_doc.exists:
+        ud = user_doc.to_dict()
+        # Lấy chính xác giá trị role (nếu không có thì mặc định là 'user')
+        user_role = str(ud.get('role', 'user')).strip().lower()
+    
+    # CHỈ CÓ admin hoặc super_admin mới được coi là admin thực sự
+    is_admin = (user_role in ['admin', 'super_admin', 'super-admin'])
     
     is_get_request = (request.method == 'GET') or (str(data.get('_method', '')).upper() == 'GET')
     
-    # ⭐ XỬ LÝ LẤY LỊCH SỬ (GET) - CHỐNG SPAM READ
+    # ⭐ XỬ LÝ LẤY LỊCH SỬ (GET)
     if is_get_request:
         try:
             today_str = datetime.utcnow().strftime('%Y-%m-%d')
+            user_data = user_doc.to_dict() if user_doc.exists else {}
             last_read_date = user_data.get('lastReadDate', '')
             read_count = user_data.get('historyReadToday', 0)
             
-            # Reset lượt đọc nếu sang ngày mới
             if last_read_date != today_str:
                 read_count = 0
                 
-            # ⭐ Chặn nếu không phải Admin và đã dùng hết 100 lượt Read trong ngày
+            # Chặn nếu là user thường và đã hết 100 lượt đọc trong ngày
             if not is_admin and read_count >= 100:
                 return jsonify({
                     "ok": False, 
@@ -675,7 +680,6 @@ def history_api():
                     "readRemain": 0
                 }), 429
 
-            # Thực hiện Query đọc Firestore
             docs = history_ref.where('email', '==', email_clean).stream()
             history_list = []
             today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -700,7 +704,7 @@ def history_api():
                 
             history_list.sort(key=lambda x: x.get('sortTime', 0), reverse=True)
             
-            # Đếm tăng số lần Read và cập nhật vào Firebase
+            # Tăng số lượt đọc nếu là user thường
             if not is_admin:
                 read_count += 1
                 user_ref.set({
@@ -766,7 +770,6 @@ def history_api():
                 'createdAt': firestore.SERVER_TIMESTAMP
             })
             
-        # Cuốn chiếu 100 câu
         if len(all_docs) >= 100:
             def get_doc_time(doc):
                 ca = doc.to_dict().get('createdAt')
@@ -781,6 +784,7 @@ def history_api():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 
 @app.route('/health')

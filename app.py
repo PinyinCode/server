@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - PHÂN QUYỀN TOKEN, RESET & BẢO LƯU BONUS)
+MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - PHÂN QUYỀN TOKEN, LỊCH SỬ 100 CÂU CUỐN CHIẾU & GIỚI HẠN NGÀY)
 """
 
 from flask import Flask, request, jsonify
@@ -306,7 +306,7 @@ def grade(user_answer, correct_answer):
     return {'score': round(ratio * 100), 'status': status, 'message': message, 'errors': errors, 'suggestion': correct_answer if u != c else None, 'used_ai': used_ai}
 
 # ==========================================================
-# PHẦN 5: OTP GMAIL
+# PHẦN 5: OTP GMAIL & ROUTES KHÁC
 # ==========================================================
 def send_gmail_html(to, subject, html):
     cid, csecret = os.environ.get("GOOGLE_CLIENT_ID"), os.environ.get("GOOGLE_CLIENT_SECRET")
@@ -339,9 +339,6 @@ def build_otp_email_html(otp, device_name, email):
     </div>
     """
 
-# ==========================================================
-# PHẦN 6: ROUTES
-# ==========================================================
 @app.route('/api/delete-user', methods=['POST', 'OPTIONS'])
 def delete_user():
     if request.method == 'OPTIONS': return jsonify({}), 200
@@ -476,13 +473,9 @@ def export_excel():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ==========================================================
-# PHẦN 7: TRANSLATE API (TÍCH HỢP PHÂN QUYỀN TOKEN, RESET & BẢO LƯU BONUS)
+# PHẦN 7: TRANSLATE API (PHÂN QUYỀN TOKEN & BẢO LƯU BONUS)
 # ==========================================================
 QWEN_API_KEY = os.environ.get("DASHCOPE_API_KEY") 
-
-if not QWEN_API_KEY:
-    print("[WARNING] Chưa cấu hình DASHCOPE_API_KEY trong biến môi trường!")
-
 QWEN_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
 
 VIETNAMESE_ABBREVIATIONS = {
@@ -528,7 +521,6 @@ def translate():
         user_data = user_doc.to_dict()
         email_clean = email.strip().lower()
         
-        # ⭐ Đọc linh hoạt tier / role và tự động xử lý ngoại lệ cho email cá nhân
         raw_role = user_data.get('role')
         tier = user_data.get('tier')
         
@@ -537,23 +529,18 @@ def translate():
         else:
             role = str(raw_role or tier or 'trial').strip().lower()
         
-        # Kiểm tra ngày hết hạn expiresAt nếu có
         expires_at = user_data.get('expiresAt')
         is_expired = False
         if expires_at:
             try:
-                if hasattr(expires_at, 'strftime'):
-                    exp_date = expires_at
-                else:
-                    exp_date = datetime.strptime(str(expires_at)[:10], '%Y-%m-%d')
+                exp_date = expires_at if hasattr(expires_at, 'strftime') else datetime.strptime(str(expires_at)[:10], '%Y-%m-%d')
                 if datetime.utcnow() > exp_date:
                     is_expired = True
-            except:
-                pass
+            except: pass
 
-        # ⭐ KIỂM TRA QUOTA AN TOÀN
         if role == 'super_admin':
-            pass  # Không giới hạn token
+            quota = 999999999
+            used = 0
         elif role == 'admin':
             quota = 100000
             today_str = datetime.utcnow().strftime('%Y-%m-%d')
@@ -570,7 +557,6 @@ def translate():
             quota = 0
             used = user_data.get('tokensUsed', 0)
         else:
-            # Mặc định active hoặc tài khoản còn hạn (20,000 token/tháng, bảo lưu bonusTokens)
             quota = user_data.get('tokenQuota', 20000)
             current_month = datetime.utcnow().strftime('%Y-%m')
             last_reset_month = user_data.get('lastTokenResetMonth', '')
@@ -620,12 +606,10 @@ def translate():
             return jsonify({"error": res_data['error']['message']}), 500
             
         translated_text = res_data['choices'][0]['message']['content']
-        
         for ph, original in placeholders.items():
             translated_text = translated_text.replace(ph, original)
 
         tokens_used = res_data.get('usage', {}).get('total_tokens', 0)
-        
         if role != 'super_admin' and tokens_used > 0:
             user_ref.update({
                 'tokensUsed': firestore.Increment(tokens_used),
@@ -640,6 +624,83 @@ def translate():
     except Exception as e:
         print(f"[Translate API] Lỗi: {e}")
         return jsonify({"error": str(e)}), 500
+
+# ==========================================================
+# PHẦN 8: LỊCH SỬ DỊCH (GIỚI HẠN 100 CÂU/NGÀY & CUỐN CHIẾU 100 CÂU)
+# ==========================================================
+@app.route('/api/history', methods=['POST', 'GET', 'OPTIONS'])
+def history_api():
+    if request.method == 'OPTIONS': return jsonify({}), 200
+    if not FIREBASE_READY: return jsonify({"ok": False, "error": "Firebase chưa cấu hình"}), 503
+    
+    data = request.json or request.args or {}
+    email = data.get('email') or request.form.get('email')
+    if not email:
+        return jsonify({"ok": False, "error": "Thiếu email"}), 400
+        
+    email_clean = email.strip().lower()
+    db = firestore.client()
+    history_ref = db.collection('translation_history')
+    
+    # Xử lý lấy lịch sử (GET hoặc _method = GET)
+    if request.method == 'GET' or data.get('_method') == 'GET':
+        try:
+            docs = history_ref.where('email', '==', email_clean).order_by('createdAt', direction=firestore.Query.DESCENDING).limit(100).stream()
+            history_list = []
+            for doc in docs:
+                d = doc.to_dict()
+                created_at = d.get('createdAt')
+                if hasattr(created_at, 'strftime'):
+                    d['createdAt'] = created_at.strftime('%Y-%m-%d %H:%M:%S')
+                history_list.append(d)
+            return jsonify({"ok": True, "history": history_list})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+    # Xử lý lưu lịch sử (POST)
+    try:
+        items = data.get('items')
+        if not items:
+            vi = data.get('text_vi', '')
+            zh = data.get('text_zh', '')
+            pinyin_str = data.get('pinyin', '')
+            if vi or zh:
+                items = [{'vi': vi, 'zh': zh, 'pinyin': pinyin_str}]
+            else:
+                return jsonify({"ok": False, "error": "Thiếu dữ liệu items"}), 400
+                
+        if isinstance(items, dict):
+            items = [items]
+            
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_query = history_ref.where('email', '==', email_clean).where('createdAt', '>=', today_start).stream()
+        today_count = sum(1 for _ in today_query)
+        
+        remaining_quota_today = 100 - today_count
+        if remaining_quota_today <= 0:
+            return jsonify({"ok": False, "error": "Đã đạt giới hạn lưu 100 câu trong ngày!"}), 429
+            
+        items_to_save = items[:remaining_quota_today]
+        
+        for item in items_to_save:
+            history_ref.add({
+                'email': email_clean,
+                'text_vi': item.get('vi') or item.get('text_vi', ''),
+                'text_zh': item.get('zh') or item.get('text_zh', ''),
+                'pinyin': item.get('pinyin', ''),
+                'createdAt': firestore.SERVER_TIMESTAMP
+            })
+            
+        # Cuốn chiếu: Giữ tối đa 100 bản ghi mới nhất cho mỗi user
+        all_user_docs = list(history_ref.where('email', '==', email_clean).order_by('createdAt', direction=firestore.Query.DESCENDING).stream())
+        if len(all_user_docs) > 100:
+            for old_doc in all_user_docs[100:]:
+                old_doc.reference.delete()
+                
+        return jsonify({"ok": True, "saved": len(items_to_save)})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route('/health')
 def health():
@@ -658,7 +719,7 @@ def warmup():
 
 @app.route('/')
 def index():
-    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.8-Smart-Role-Fallback', 'status': 'Running'})
+    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.9-Batch-History', 'status': 'Running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

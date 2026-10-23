@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - TÍCH HỢP BẢO VỆ TỪ, VIẾT TẮT & BATCH TOKEN)
+MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - PHÂN QUYỀN TOKEN & BẢO VỆ TỪ)
 """
 
 from flask import Flask, request, jsonify
@@ -476,7 +476,7 @@ def export_excel():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ==========================================================
-# PHẦN 7: TRANSLATE API (TÍCH HỢP TOKEN & QWEN & MỞ RỘNG VIẾT TẮT)
+# PHẦN 7: TRANSLATE API (TÍCH HỢP PHÂN QUYỀN TOKEN & QWEN)
 # ==========================================================
 QWEN_API_KEY = os.environ.get("DASHCOPE_API_KEY") 
 
@@ -526,14 +526,38 @@ def translate():
             return jsonify({"error": "Tài khoản không tồn tại"}), 404
             
         user_data = user_doc.to_dict()
+        role = user_data.get('role', 'trial')
         
-        if user_data.get('role') != 'admin':
-            quota = user_data.get('tokenQuota', 20000)
-            bonus = user_data.get('bonusTokens', 0)
+        # ⭐ KIỂM TRA QUOTA THEO PHÂN QUYỀN MỚI
+        if role != 'super_admin':
+            today_str = datetime.utcnow().strftime('%Y-%m-%d')
             used = user_data.get('tokensUsed', 0)
+            
+            if role == 'admin':
+                quota = 100000
+                last_reset = user_data.get('lastTokenResetDate', '')
+                # Tự động reset 100,000 token hàng ngày cho tài khoản Admin
+                if last_reset != today_str:
+                    used = 0
+                    user_ref.update({
+                        'tokensUsed': 0,
+                        'lastTokenResetDate': today_str,
+                        'tokenQuota': 100000
+                    })
+            elif role == 'active':
+                quota = user_data.get('tokenQuota', 20000)
+            else:
+                # Tài khoản trial, demo không được cấp sẵn token mặc định
+                quota = 0
+                
+            bonus = user_data.get('bonusTokens', 0)
             total_available = quota + bonus
-            if used >= total_available:
-                return jsonify({"error": "Bạn đã hết token, vui lòng mua thêm!"}), 403
+            
+            if total_available <= 0 or used >= total_available:
+                return jsonify({"error": "Tài khoản của bạn chưa được kích hoạt hoặc đã hết quota token!"}), 403
+        else:
+            # super_admin: Không giới hạn token
+            pass
 
         source_lang = 'Chinese' if source == 'zh-CN' else 'Vietnamese'
         target_lang = 'Vietnamese' if target == 'vi' else 'Chinese'
@@ -571,7 +595,7 @@ def translate():
 
         tokens_used = res_data.get('usage', {}).get('total_tokens', 0)
         
-        if user_data.get('role') != 'admin' and tokens_used > 0:
+        if role != 'super_admin' and tokens_used > 0:
             user_ref.update({
                 'tokensUsed': firestore.Increment(tokens_used),
                 'lastTokenUsedAt': firestore.SERVER_TIMESTAMP
@@ -603,7 +627,7 @@ def warmup():
 
 @app.route('/')
 def index():
-    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.5-Optimized', 'status': 'Running'})
+    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.6-Translate-Token-Role', 'status': 'Running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - PHÂN QUYỀN TOKEN & BẢO VỆ TỪ)
+MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - PHÂN QUYỀN TOKEN, RESET & BẢO LƯU BONUS)
 """
 
 from flask import Flask, request, jsonify
@@ -175,7 +175,7 @@ def get_pinyin_vocab(char):
     return ''
 
 def analyze_char(char):
-    if not char or len(char) != 1 or not ('\u4e00' <= char <= '\u9fff') or not HAS_VOCAB:
+    if not char or len(char) != 1 or not ('\u4e00' <= char <= \u9fff) or not HAS_VOCAB:
         return None
     try:
         result = {'char': char, 'pinyin': get_pinyin_vocab(char)}
@@ -476,7 +476,7 @@ def export_excel():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ==========================================================
-# PHẦN 7: TRANSLATE API (TÍCH HỢP PHÂN QUYỀN TOKEN & QWEN)
+# PHẦN 7: TRANSLATE API (TÍCH HỢP PHÂN QUYỀN TOKEN, RESET & BẢO LƯU BONUS)
 # ==========================================================
 QWEN_API_KEY = os.environ.get("DASHCOPE_API_KEY") 
 
@@ -528,15 +528,16 @@ def translate():
         user_data = user_doc.to_dict()
         role = user_data.get('role', 'trial')
         
-        # ⭐ KIỂM TRA QUOTA THEO PHÂN QUYỀN MỚI
+        # ⭐ KIỂM TRA QUOTA THEO PHÂN QUYỀN, RESET & BẢO LƯU BONUS
         if role != 'super_admin':
             today_str = datetime.utcnow().strftime('%Y-%m-%d')
+            current_month = datetime.utcnow().strftime('%Y-%m')
             used = user_data.get('tokensUsed', 0)
             
             if role == 'admin':
                 quota = 100000
                 last_reset = user_data.get('lastTokenResetDate', '')
-                # Tự động reset 100,000 token hàng ngày cho tài khoản Admin
+                # Admin reset 100,000 token hàng ngày
                 if last_reset != today_str:
                     used = 0
                     user_ref.update({
@@ -546,15 +547,25 @@ def translate():
                     })
             elif role == 'active':
                 quota = user_data.get('tokenQuota', 20000)
+                last_reset_month = user_data.get('lastTokenResetMonth', '')
+                # Active reset 20,000 token cơ bản đầu tháng mới, GIỮ NGUYÊN bonusTokens
+                if last_reset_month != current_month:
+                    used = 0
+                    user_ref.update({
+                        'tokensUsed': 0,
+                        'lastTokenResetMonth': current_month,
+                        'tokenQuota': 20000
+                    })
             else:
-                # Tài khoản trial, demo không được cấp sẵn token mặc định
+                # Tài khoản trial, demo không có token cơ bản sẵn
                 quota = 0
                 
+            # Token nạp thêm (bonusTokens) được bảo lưu và cộng dồn hoàn toàn
             bonus = user_data.get('bonusTokens', 0)
             total_available = quota + bonus
             
             if total_available <= 0 or used >= total_available:
-                return jsonify({"error": "Tài khoản của bạn chưa được kích hoạt hoặc đã hết quota token!"}), 403
+                return jsonify({"error": "Tài khoản của bạn đã hết quota token, vui lòng nạp thêm để tiếp tục sử dụng!"}), 403
         else:
             # super_admin: Không giới hạn token
             pass
@@ -627,7 +638,7 @@ def warmup():
 
 @app.route('/')
 def index():
-    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.6-Translate-Token-Role', 'status': 'Running'})
+    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.7-Token-Role-Preserve', 'status': 'Running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

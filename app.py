@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - TÍCH HỢP TOKEN DỊCH THUẬT)
+MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - TÍCH HỢP BẢO VỆ TỪ TIẾNG ANH & TOKEN)
 """
 
 from flask import Flask, request, jsonify
@@ -15,7 +15,7 @@ import random
 import base64
 import threading
 import traceback
-import requests # ⭐ ĐÃ THÊM THƯ VIỆN REQUESTS
+import requests
 from datetime import datetime, timedelta
 
 # Thư viện OTP & Firebase & Excel
@@ -413,7 +413,6 @@ def verify_otp():
         record = otp_collection.find_one({'email': el}, sort=[('createdAt', -1)])
         if not record: return jsonify({'ok': False, 'error': 'OTP không tồn tại hoặc đã hết hạn'}), 400
         
-        # Sửa lỗi cú pháp: datetime.utcnow() và định dạng JSON phản hồi chuẩn
         if datetime.utcnow() - record['createdAt'] > timedelta(minutes=10):
             otp_collection.delete_many({'email': el})
             return jsonify({'ok': False, 'error': 'OTP đã hết hạn'}), 400
@@ -493,9 +492,8 @@ def export_excel():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ==========================================================
-# PHẦN 7: TRANSLATE API (TÍCH HỢP TOKEN & QWEN)
+# PHẦN 7: TRANSLATE API (TÍCH HỢP TOKEN & QWEN & BẢO VỆ TIẾNG ANH)
 # ==========================================================
-# ⭐ Đọc API Key từ biến môi trường DASHCOPE_API_KEY
 QWEN_API_KEY = os.environ.get("DASHCOPE_API_KEY") 
 
 if not QWEN_API_KEY:
@@ -527,24 +525,31 @@ def translate():
             
         user_data = user_doc.to_dict()
         
-        # ⭐ KIỂM TRA TOKEN (Sửa lỗi ngắt dòng gán biến `quota`)
         if user_data.get('role') != 'admin':
             quota = user_data.get('tokenQuota', 20000)
-            bonus = user_data.get('bonusTokens', 0)  # Lấy token mua thêm
+            bonus = user_data.get('bonusTokens', 0)
             used = user_data.get('tokensUsed', 0)
             
-            total_available = quota + bonus  # Tổng token được phép dùng
+            total_available = quota + bonus
             
             if used >= total_available:
                 return jsonify({"error": "Bạn đã hết token, vui lòng mua thêm!"}), 403
 
-        # Gọi Qwen Dịch
         source_lang = 'Chinese' if source == 'zh-CN' else 'Vietnamese'
         target_lang = 'Vietnamese' if target == 'vi' else 'Chinese'
         
+        # ⭐ BẢO VỆ TỪ TIẾNG ANH: Tạm ẩn các từ tiếng Anh để Qwen không dịch sang tiếng Trung
+        placeholders = {}
+        def protect_replacer(match):
+            ph = f"__ENG_{len(placeholders)}__"
+            placeholders[ph] = match.group(0)
+            return ph
+        
+        protected_text = re.sub(r'\b[A-Za-z][A-Za-z0-9+#.-]*\b', protect_replacer, text)
+
         payload = {
             "model": "qwen-mt-flash",
-            "messages": [{"role": "user", "content": text}],
+            "messages": [{"role": "user", "content": protected_text}],
             "translation_options": {"source_lang": source_lang, "target_lang": target_lang}
         }
         headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
@@ -555,9 +560,13 @@ def translate():
             return jsonify({"error": res_data['error']['message']}), 500
             
         translated_text = res_data['choices'][0]['message']['content']
+        
+        # ⭐ KHÔI PHỤC LẠI TỪ TIẾNG ANH GỐC SAU KHI DỊCH XONG
+        for ph, original in placeholders.items():
+            translated_text = translated_text.replace(ph, original)
+
         tokens_used = res_data.get('usage', {}).get('total_tokens', 0)
         
-        # Trừ token trên Firestore (Chỉ trừ nếu không phải Admin)
         if user_data.get('role') != 'admin' and tokens_used > 0:
             user_ref.update({
                 'tokensUsed': firestore.Increment(tokens_used),
@@ -593,7 +602,7 @@ def warmup():
 
 @app.route('/')
 def index():
-    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.3-Translate-Token', 'status': 'Running'})
+    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.4-Translate-Token-Eng', 'status': 'Running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

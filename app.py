@@ -525,11 +525,16 @@ def translate():
         if not user_doc.exists:
             return jsonify({"error": "Tài khoản không tồn tại"}), 404
             
-        user_data = user_doc.to_dict()
-        role = user_data.get('role', 'trial')
+                user_data = user_doc.to_dict()
         
-        # ⭐ KIỂM TRA QUOTA THEO PHÂN QUYỀN, RESET & BẢO LƯU BONUS
-        if role != 'super_admin':
+        # ⭐ ƯU TIÊN ĐỌC 'role' TRƯỚC, sau đó mới đến 'tier' để tránh xung đột
+        raw_role = user_data.get('role') or user_data.get('tier', 'trial')
+        role = str(raw_role).strip().lower()
+        
+        # ⭐ KIỂM TRA QUOTA AN TOÀN
+        if role == 'super_admin':
+            pass  # Không giới hạn token
+        else:
             today_str = datetime.utcnow().strftime('%Y-%m-%d')
             current_month = datetime.utcnow().strftime('%Y-%m')
             used = user_data.get('tokensUsed', 0)
@@ -537,7 +542,6 @@ def translate():
             if role == 'admin':
                 quota = 100000
                 last_reset = user_data.get('lastTokenResetDate', '')
-                # Admin reset 100,000 token hàng ngày
                 if last_reset != today_str:
                     used = 0
                     user_ref.update({
@@ -545,10 +549,12 @@ def translate():
                         'lastTokenResetDate': today_str,
                         'tokenQuota': 100000
                     })
-            elif role == 'active':
+            elif role in ['trial', 'demo', 'user']:
+                quota = 0
+            else:
+                # Mặc định cho active hoặc các tài khoản cấp phép khác (20,000 token/tháng)
                 quota = user_data.get('tokenQuota', 20000)
                 last_reset_month = user_data.get('lastTokenResetMonth', '')
-                # Active reset 20,000 token cơ bản đầu tháng mới, GIỮ NGUYÊN bonusTokens
                 if last_reset_month != current_month:
                     used = 0
                     user_ref.update({
@@ -556,16 +562,13 @@ def translate():
                         'lastTokenResetMonth': current_month,
                         'tokenQuota': 20000
                     })
-            else:
-                # Tài khoản trial, demo không có token cơ bản sẵn
-                quota = 0
                 
-            # Token nạp thêm (bonusTokens) được bảo lưu và cộng dồn hoàn toàn
             bonus = user_data.get('bonusTokens', 0)
             total_available = quota + bonus
             
             if total_available <= 0 or used >= total_available:
                 return jsonify({"error": "Tài khoản của bạn đã hết quota token, vui lòng nạp thêm để tiếp tục sử dụng!"}), 403
+
         else:
             # super_admin: Không giới hạn token
             pass

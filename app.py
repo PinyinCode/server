@@ -175,7 +175,6 @@ def get_pinyin_vocab(char):
     return ''
 
 def analyze_char(char):
-    # Đã sửa lỗi thiếu dấu nháy đơn ở \u9fff
     if not char or len(char) != 1 or not ('\u4e00' <= char <= '\u9fff') or not HAS_VOCAB:
         return None
     try:
@@ -527,48 +526,69 @@ def translate():
             return jsonify({"error": "Tài khoản không tồn tại"}), 404
             
         user_data = user_doc.to_dict()
+        email_clean = email.strip().lower()
         
-        # ⭐ ƯU TIÊN ĐỌC 'role' TRƯỚC, sau đó mới đến 'tier' để tránh xung đột
-        raw_role = user_data.get('role') or user_data.get('tier', 'trial')
-        role = str(raw_role).strip().lower()
+        # ⭐ Đọc linh hoạt tier / role và tự động xử lý ngoại lệ cho email cá nhân
+        raw_role = user_data.get('role')
+        tier = user_data.get('tier')
         
+        if email_clean == 'esp32.hotro@gmail.com' or tier == 'active':
+            role = 'active'
+        else:
+            role = str(raw_role or tier or 'trial').strip().lower()
+        
+        # Kiểm tra ngày hết hạn expiresAt nếu có
+        expires_at = user_data.get('expiresAt')
+        is_expired = False
+        if expires_at:
+            try:
+                if hasattr(expires_at, 'strftime'):
+                    exp_date = expires_at
+                else:
+                    exp_date = datetime.strptime(str(expires_at)[:10], '%Y-%m-%d')
+                if datetime.utcnow() > exp_date:
+                    is_expired = True
+            except:
+                pass
+
         # ⭐ KIỂM TRA QUOTA AN TOÀN
         if role == 'super_admin':
             pass  # Không giới hạn token
-        else:
+        elif role == 'admin':
+            quota = 100000
             today_str = datetime.utcnow().strftime('%Y-%m-%d')
+            last_reset = user_data.get('lastTokenResetDate', '')
+            used = user_data.get('tokensUsed', 0)
+            if last_reset != today_str:
+                used = 0
+                user_ref.update({
+                    'tokensUsed': 0,
+                    'lastTokenResetDate': today_str,
+                    'tokenQuota': 100000
+                })
+        elif role in ['trial', 'demo', 'user'] and is_expired:
+            quota = 0
+            used = user_data.get('tokensUsed', 0)
+        else:
+            # Mặc định active hoặc tài khoản còn hạn (20,000 token/tháng, bảo lưu bonusTokens)
+            quota = user_data.get('tokenQuota', 20000)
             current_month = datetime.utcnow().strftime('%Y-%m')
+            last_reset_month = user_data.get('lastTokenResetMonth', '')
             used = user_data.get('tokensUsed', 0)
             
-            if role == 'admin':
-                quota = 100000
-                last_reset = user_data.get('lastTokenResetDate', '')
-                if last_reset != today_str:
-                    used = 0
-                    user_ref.update({
-                        'tokensUsed': 0,
-                        'lastTokenResetDate': today_str,
-                        'tokenQuota': 100000
-                    })
-            elif role in ['trial', 'demo', 'user']:
-                quota = 0
-            else:
-                # Mặc định cho active hoặc các tài khoản cấp phép khác (20,000 token/tháng)
-                quota = user_data.get('tokenQuota', 20000)
-                last_reset_month = user_data.get('lastTokenResetMonth', '')
-                if last_reset_month != current_month:
-                    used = 0
-                    user_ref.update({
-                        'tokensUsed': 0,
-                        'lastTokenResetMonth': current_month,
-                        'tokenQuota': 20000
-                    })
+            if last_reset_month != current_month:
+                used = 0
+                user_ref.update({
+                    'tokensUsed': 0,
+                    'lastTokenResetMonth': current_month,
+                    'tokenQuota': 20000
+                })
                 
-            bonus = user_data.get('bonusTokens', 0)
-            total_available = quota + bonus
-            
-            if total_available <= 0 or used >= total_available:
-                return jsonify({"error": "Tài khoản của bạn đã hết quota token, vui lòng nạp thêm để tiếp tục sử dụng!"}), 403
+        bonus = user_data.get('bonusTokens', 0)
+        total_available = quota + bonus
+        
+        if role != 'super_admin' and (total_available <= 0 or used >= total_available):
+            return jsonify({"error": "Tài khoản của bạn đã hết quota token, vui lòng nạp thêm để tiếp tục sử dụng!"}), 403
 
         source_lang = 'Chinese' if source == 'zh-CN' else 'Vietnamese'
         target_lang = 'Vietnamese' if target == 'vi' else 'Chinese'
@@ -638,7 +658,7 @@ def warmup():
 
 @app.route('/')
 def index():
-    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.7-Token-Role-Preserve', 'status': 'Running'})
+    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.8-Smart-Role-Fallback', 'status': 'Running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

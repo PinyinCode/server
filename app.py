@@ -643,20 +643,35 @@ def delete_history_item():
         return jsonify({"ok": False, "error": "Thiếu email hoặc ID bản ghi"}), 400
         
     try:
+        email_clean = email.strip().lower()
         db = firestore.client()
         doc_ref = db.collection('translation_history').document(doc_id)
         doc = doc_ref.get()
         
         if doc.exists:
-            # Kiểm tra quyền sở hữu bảo mật
-            if doc.to_dict().get('email') == email.strip().lower():
+            if doc.to_dict().get('email') == email_clean:
                 doc_ref.delete()
-                return jsonify({"ok": True, "message": "Đã xóa thành công"})
+                
+                # ⭐ Tính toán lại số lượng câu còn lại trong ngày sau khi xóa
+                history_ref = db.collection('translation_history')
+                all_docs = list(history_ref.where('email', '==', email_clean).stream())
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                today_count = 0
+                
+                for d_item in all_docs:
+                    d_data = d_item.to_dict()
+                    ca = d_data.get('createdAt')
+                    if ca and hasattr(ca, 'replace'):
+                        if ca.replace(tzinfo=None) >= today_start:
+                            today_count += 1
+                            
+                return jsonify({"ok": True, "message": "Đã xóa thành công", "todayCount": today_count})
         
         return jsonify({"ok": False, "error": "Không tìm thấy bản ghi hoặc không có quyền"}), 404
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 
 @app.route('/api/history', methods=['POST', 'GET', 'OPTIONS'])

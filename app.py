@@ -636,7 +636,6 @@ def history_api():
     if not FIREBASE_READY: 
         return jsonify({"ok": False, "error": "Firebase chưa cấu hình"}), 503
     
-    # Lấy dữ liệu an toàn từ cả JSON, Form hoặc Args
     data = request.get_json(silent=True) or request.form or request.args or {}
     email = data.get('email') or request.args.get('email')
     
@@ -647,26 +646,35 @@ def history_api():
     db = firestore.client()
     history_ref = db.collection('translation_history')
     
-    # ⭐ Xử lý LẤY LỊCH SỬ (GET hoặc _method = GET)
-    if request.method == 'GET' or str(data.get('_method', '')).upper() == 'GET':
+    is_get_request = (request.method == 'GET') or (str(data.get('_method', '')).upper() == 'GET')
+    
+    # ⭐ XỬ LÝ LẤY LỊCH SỬ (GET)
+    if is_get_request:
         try:
-            # Truy vấn lấy lịch sử của user, sắp xếp mới nhất lên đầu
-            docs = history_ref.where('email', '==', email_clean).order_by('createdAt', direction=firestore.Query.DESCENDING).limit(100).stream()
+            docs = history_ref.where('email', '==', email_clean).stream()
             history_list = []
+            
             for doc in docs:
                 d = doc.to_dict()
                 created_at = d.get('createdAt')
                 if hasattr(created_at, 'strftime'):
-                    d['createdAt'] = created_at.strftime('%Y-%m-%d %H:%M:%S')
+                    d['createdAtStr'] = created_at.strftime('%Y-%m-%d %H:%M:%S')
+                    d['sortTime'] = created_at.timestamp()
                 else:
-                    d['createdAt'] = str(created_at or '')
+                    d['createdAtStr'] = str(created_at or '')
+                    d['sortTime'] = 0
+                    
+                d['createdAt'] = d['createdAtStr']
                 history_list.append(d)
-            return jsonify({"ok": True, "history": history_list})
+                
+            history_list.sort(key=lambda x: x.get('sortTime', 0), reverse=True)
+            return jsonify({"ok": True, "history": history_list[:100]})
+            
         except Exception as e:
             traceback.print_exc()
             return jsonify({"ok": False, "error": str(e)}), 500
 
-    # ⭐ Xử lý LƯU LỊCH SỬ (POST)
+    # ⭐ XỬ LÝ LƯU LỊCH SỬ (POST)
     try:
         items = data.get('items')
         if not items:
@@ -681,10 +689,19 @@ def history_api():
         if isinstance(items, dict):
             items = [items]
             
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        today_query = history_ref.where('email', '==', email_clean).where('createdAt', '>=', today_start).stream()
-        today_count = sum(1 for _ in today_query)
+        # 💡 Lấy toàn bộ lịch sử của user và lọc ngày trên Python để TRÁNH HOÀN TOÀN lỗi Index của Firebase
+        all_docs = list(history_ref.where('email', '==', email_clean).stream())
         
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_count = 0
+        
+        for doc in all_docs:
+            d = doc.to_dict()
+            ca = d.get('createdAt')
+            if ca and hasattr(ca, 'replace'):
+                if ca.replace(tzinfo=None) >= today_start:
+                    today_count += 1
+
         remaining_quota_today = 100 - today_count
         if remaining_quota_today <= 0:
             return jsonify({"ok": False, "error": "Đã đạt giới hạn lưu 100 câu trong ngày!"}), 429
@@ -700,13 +717,19 @@ def history_api():
                 'createdAt': firestore.SERVER_TIMESTAMP
             })
             
-        # Cuốn chiếu: Giữ tối đa 100 bản ghi mới nhất cho mỗi user
-        all_user_docs = list(history_ref.where('email', '==', email_clean).order_by('createdAt', direction=firestore.Query.DESCENDING).stream())
-        if len(all_user_docs) > 100:
-            for old_doc in all_user_docs[100:]:
+        # Cuốn chiếu: Giữ lại tối đa 100 bản ghi mới nhất
+        if len(all_docs) >= 100:
+            def get_doc_time(doc):
+                ca = doc.to_dict().get('createdAt')
+                return ca.timestamp() if hasattr(ca, 'timestamp') else 0
+                
+            all_docs.sort(key=get_doc_time, reverse=True)
+            # Xóa các bản ghi vượt quá 100
+            for old_doc in all_docs[99:]:
                 old_doc.reference.delete()
                 
         return jsonify({"ok": True, "saved": len(items_to_save)})
+        
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(e)}), 500

@@ -630,11 +630,16 @@ def translate():
 # ==========================================================
 @app.route('/api/history', methods=['POST', 'GET', 'OPTIONS'])
 def history_api():
-    if request.method == 'OPTIONS': return jsonify({}), 200
-    if not FIREBASE_READY: return jsonify({"ok": False, "error": "Firebase chưa cấu hình"}), 503
+    if request.method == 'OPTIONS': 
+        return jsonify({}), 200
+        
+    if not FIREBASE_READY: 
+        return jsonify({"ok": False, "error": "Firebase chưa cấu hình"}), 503
     
-    data = request.json or request.args or {}
-    email = data.get('email') or request.form.get('email')
+    # Lấy dữ liệu an toàn từ cả JSON, Form hoặc Args
+    data = request.get_json(silent=True) or request.form or request.args or {}
+    email = data.get('email') or request.args.get('email')
+    
     if not email:
         return jsonify({"ok": False, "error": "Thiếu email"}), 400
         
@@ -642,9 +647,10 @@ def history_api():
     db = firestore.client()
     history_ref = db.collection('translation_history')
     
-    # Xử lý lấy lịch sử (GET hoặc _method = GET)
-    if request.method == 'GET' or data.get('_method') == 'GET':
+    # ⭐ Xử lý LẤY LỊCH SỬ (GET hoặc _method = GET)
+    if request.method == 'GET' or str(data.get('_method', '')).upper() == 'GET':
         try:
+            # Truy vấn lấy lịch sử của user, sắp xếp mới nhất lên đầu
             docs = history_ref.where('email', '==', email_clean).order_by('createdAt', direction=firestore.Query.DESCENDING).limit(100).stream()
             history_list = []
             for doc in docs:
@@ -652,12 +658,15 @@ def history_api():
                 created_at = d.get('createdAt')
                 if hasattr(created_at, 'strftime'):
                     d['createdAt'] = created_at.strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    d['createdAt'] = str(created_at or '')
                 history_list.append(d)
             return jsonify({"ok": True, "history": history_list})
         except Exception as e:
+            traceback.print_exc()
             return jsonify({"ok": False, "error": str(e)}), 500
 
-    # Xử lý lưu lịch sử (POST)
+    # ⭐ Xử lý LƯU LỊCH SỬ (POST)
     try:
         items = data.get('items')
         if not items:

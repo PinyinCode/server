@@ -626,8 +626,39 @@ def translate():
         return jsonify({"error": str(e)}), 500
 
 # ==========================================================
-# PHẦN 8: LỊCH SỬ DỊCH (GIỚI HẠN 100 CÂU/NGÀY & CUỐN CHIẾU 100 CÂU)
+# PHẦN 8: LỊCH SỬ DỊCH (XÓA THỦ CÔNG, BỘ ĐẾM & GIỚI HẠN 100 CÂU/NGÀY)
 # ==========================================================
+@app.route('/api/history/delete', methods=['POST', 'OPTIONS'])
+def delete_history_item():
+    if request.method == 'OPTIONS': 
+        return jsonify({}), 200
+    if not FIREBASE_READY: 
+        return jsonify({"ok": False, "error": "Firebase chưa cấu hình"}), 503
+        
+    data = request.get_json(silent=True) or {}
+    email = data.get('email')
+    doc_id = data.get('id')
+    
+    if not email or not doc_id:
+        return jsonify({"ok": False, "error": "Thiếu email hoặc ID bản ghi"}), 400
+        
+    try:
+        db = firestore.client()
+        doc_ref = db.collection('translation_history').document(doc_id)
+        doc = doc_ref.get()
+        
+        if doc.exists:
+            # Kiểm tra quyền sở hữu bảo mật
+            if doc.to_dict().get('email') == email.strip().lower():
+                doc_ref.delete()
+                return jsonify({"ok": True, "message": "Đã xóa thành công"})
+        
+        return jsonify({"ok": False, "error": "Không tìm thấy bản ghi hoặc không có quyền"}), 404
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route('/api/history', methods=['POST', 'GET', 'OPTIONS'])
 def history_api():
     if request.method == 'OPTIONS': 
@@ -646,20 +677,35 @@ def history_api():
     db = firestore.client()
     history_ref = db.collection('translation_history')
     
+    # Kiểm tra phân quyền role của user (Admin / Super Admin không giới hạn 100 câu)
+    user_doc = db.collection('allowed_users').document(email_clean).get()
+    user_role = 'user'
+    if user_doc.exists:
+        ud = user_doc.to_dict()
+        user_role = str(ud.get('role') or ud.get('tier') or 'user').strip().lower()
+    
+    is_admin = (user_role in ['admin', 'super_admin', 'super-admin'])
+    
     is_get_request = (request.method == 'GET') or (str(data.get('_method', '')).upper() == 'GET')
     
-    # ⭐ XỬ LÝ LẤY LỊCH SỬ (GET)
+    # ⭐ XỬ LÝ LẤY LỊCH SỬ & ĐẾM SỐ CÂU HÔM NAY (GET)
     if is_get_request:
         try:
             docs = history_ref.where('email', '==', email_clean).stream()
             history_list = []
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_count = 0
             
             for doc in docs:
                 d = doc.to_dict()
+                d['id'] = doc.id  # Đính kèm ID để phục vụ việc xóa
                 created_at = d.get('createdAt')
+                
                 if hasattr(created_at, 'strftime'):
                     d['createdAtStr'] = created_at.strftime('%Y-%m-%d %H:%M:%S')
                     d['sortTime'] = created_at.timestamp()
+                    if created_at.replace(tzinfo=None) >= today_start:
+                        today_count += 1
                 else:
                     d['createdAtStr'] = str(created_at or '')
                     d['sortTime'] = 0
@@ -668,7 +714,12 @@ def history_api():
                 history_list.append(d)
                 
             history_list.sort(key=lambda x: x.get('sortTime', 0), reverse=True)
-            return jsonify({"ok": True, "history": history_list[:100]})
+            return jsonify({
+                "ok": True, 
+                "history": history_list[:100], 
+                "todayCount": today_count,
+                "isAdmin": is_admin
+            })
             
         except Exception as e:
             traceback.print_exc()
@@ -689,9 +740,7 @@ def history_api():
         if isinstance(items, dict):
             items = [items]
             
-        # 💡 Lấy toàn bộ lịch sử của user và lọc ngày trên Python để TRÁNH HOÀN TOÀN lỗi Index của Firebase
         all_docs = list(history_ref.where('email', '==', email_clean).stream())
-        
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         today_count = 0
         
@@ -702,11 +751,14 @@ def history_api():
                 if ca.replace(tzinfo=None) >= today_start:
                     today_count += 1
 
-        remaining_quota_today = 100 - today_count
-        if remaining_quota_today <= 0:
-            return jsonify({"ok": False, "error": "Đã đạt giới hạn lưu 100 câu trong ngày!"}), 429
-            
-        items_to_save = items[:remaining_quota_today]
+        # Admin & Super Admin không bị giới hạn 100 câu/ngày
+        if not is_admin:
+            remaining_quota_today = 100 - today_count
+            if remaining_quota_today <= 0:
+                return jsonify({"ok": False, "error": "Đã đạt giới hạn lưu 100 câu trong ngày!"}), 429
+            items_to_save = items[:remaining_quota_today]
+        else:
+            items_to_save = items
         
         for item in items_to_save:
             history_ref.add({
@@ -717,15 +769,15 @@ def history_api():
                 'createdAt': firestore.SERVER_TIMESTAMP
             })
             
-        # Cuốn chiếu: Giữ lại tối đa 100 bản ghi mới nhất
-        if len(all_docs) >= 100:
+        # Cuốn chiếu: Giữ lại tối đa 100 bản ghi mới nhất (trừ admin nếu muốn giữ nhiều hơn, tùy chọn)
+        all_docs_refresh = list(history_ref.where('email', '==', email_clean).stream())
+        if len(all_docs_refresh) > 100:
             def get_doc_time(doc):
                 ca = doc.to_dict().get('createdAt')
                 return ca.timestamp() if hasattr(ca, 'timestamp') else 0
                 
-            all_docs.sort(key=get_doc_time, reverse=True)
-            # Xóa các bản ghi vượt quá 100
-            for old_doc in all_docs[99:]:
+            all_docs_refresh.sort(key=get_doc_time, reverse=True)
+            for old_doc in all_docs_refresh[100:]:
                 old_doc.reference.delete()
                 
         return jsonify({"ok": True, "saved": len(items_to_save)})
@@ -733,6 +785,7 @@ def history_api():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route('/health')
 def health():

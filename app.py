@@ -626,54 +626,8 @@ def translate():
         return jsonify({"error": str(e)}), 500
 
 # ==========================================================
-# PHẦN 8: LỊCH SỬ DỊCH (XÓA THỦ CÔNG, BỘ ĐẾM & GIỚI HẠN 100 CÂU/NGÀY)
+# PHẦN 8: LỊCH SỬ DỊCH (GIỚI HẠN 100 LƯỢT READ & 100 LƯỢT SAVE/NGÀY)
 # ==========================================================
-@app.route('/api/history/delete', methods=['POST', 'OPTIONS'])
-def delete_history_item():
-    if request.method == 'OPTIONS': 
-        return jsonify({}), 200
-    if not FIREBASE_READY: 
-        return jsonify({"ok": False, "error": "Firebase chưa cấu hình"}), 503
-        
-    data = request.get_json(silent=True) or {}
-    email = data.get('email')
-    doc_id = data.get('id')
-    
-    if not email or not doc_id:
-        return jsonify({"ok": False, "error": "Thiếu email hoặc ID bản ghi"}), 400
-        
-    try:
-        email_clean = email.strip().lower()
-        db = firestore.client()
-        doc_ref = db.collection('translation_history').document(doc_id)
-        doc = doc_ref.get()
-        
-        if doc.exists:
-            if doc.to_dict().get('email') == email_clean:
-                doc_ref.delete()
-                
-                # ⭐ Tính toán lại số lượng câu còn lại trong ngày sau khi xóa
-                history_ref = db.collection('translation_history')
-                all_docs = list(history_ref.where('email', '==', email_clean).stream())
-                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-                today_count = 0
-                
-                for d_item in all_docs:
-                    d_data = d_item.to_dict()
-                    ca = d_data.get('createdAt')
-                    if ca and hasattr(ca, 'replace'):
-                        if ca.replace(tzinfo=None) >= today_start:
-                            today_count += 1
-                            
-                return jsonify({"ok": True, "message": "Đã xóa thành công", "todayCount": today_count})
-        
-        return jsonify({"ok": False, "error": "Không tìm thấy bản ghi hoặc không có quyền"}), 404
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-
 @app.route('/api/history', methods=['POST', 'GET', 'OPTIONS'])
 def history_api():
     if request.method == 'OPTIONS': 
@@ -691,36 +645,52 @@ def history_api():
     email_clean = email.strip().lower()
     db = firestore.client()
     history_ref = db.collection('translation_history')
+    user_ref = db.collection('allowed_users').document(email_clean)
     
-    # Kiểm tra phân quyền role của user (Admin / Super Admin không giới hạn 100 câu)
-    user_doc = db.collection('allowed_users').document(email_clean).get()
-    user_role = 'user'
-    if user_doc.exists:
-        ud = user_doc.to_dict()
-        user_role = str(ud.get('role') or ud.get('tier') or 'user').strip().lower()
+    # Lấy thông tin user để kiểm tra Phân quyền & Giới hạn Read
+    user_doc = user_ref.get()
+    user_data = user_doc.to_dict() if user_doc.exists else {}
     
-    is_admin = (user_role in ['admin', 'super_admin', 'super-admin'])
+    user_role = str(user_data.get('role') or user_data.get('tier') or 'user').strip().lower()
+    is_admin = (user_role in ['admin', 'super_admin', 'super-admin']) or (email_clean == 'esp32.hotro@gmail.com')
     
     is_get_request = (request.method == 'GET') or (str(data.get('_method', '')).upper() == 'GET')
     
-    # ⭐ XỬ LÝ LẤY LỊCH SỬ & ĐẾM SỐ CÂU HÔM NAY (GET)
+    # ⭐ XỬ LÝ LẤY LỊCH SỬ (GET) - CHỐNG SPAM READ
     if is_get_request:
         try:
+            today_str = datetime.utcnow().strftime('%Y-%m-%d')
+            last_read_date = user_data.get('lastReadDate', '')
+            read_count = user_data.get('historyReadToday', 0)
+            
+            # Reset lượt đọc nếu sang ngày mới
+            if last_read_date != today_str:
+                read_count = 0
+                
+            # ⭐ Chặn nếu không phải Admin và đã dùng hết 100 lượt Read trong ngày
+            if not is_admin and read_count >= 100:
+                return jsonify({
+                    "ok": False, 
+                    "error": "Bạn đã hết 100 lượt đọc lịch sử trong ngày hôm nay!",
+                    "readRemain": 0
+                }), 429
+
+            # Thực hiện Query đọc Firestore
             docs = history_ref.where('email', '==', email_clean).stream()
             history_list = []
             today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            today_count = 0
+            today_saved_count = 0
             
             for doc in docs:
                 d = doc.to_dict()
-                d['id'] = doc.id  # Đính kèm ID để phục vụ việc xóa
+                d['id'] = doc.id
                 created_at = d.get('createdAt')
                 
                 if hasattr(created_at, 'strftime'):
                     d['createdAtStr'] = created_at.strftime('%Y-%m-%d %H:%M:%S')
                     d['sortTime'] = created_at.timestamp()
                     if created_at.replace(tzinfo=None) >= today_start:
-                        today_count += 1
+                        today_saved_count += 1
                 else:
                     d['createdAtStr'] = str(created_at or '')
                     d['sortTime'] = 0
@@ -729,10 +699,23 @@ def history_api():
                 history_list.append(d)
                 
             history_list.sort(key=lambda x: x.get('sortTime', 0), reverse=True)
+            
+            # Đếm tăng số lần Read và cập nhật vào Firebase
+            if not is_admin:
+                read_count += 1
+                user_ref.set({
+                    'historyReadToday': read_count,
+                    'lastReadDate': today_str
+                }, merge=True)
+            
+            read_remain = 999999 if is_admin else (100 - read_count)
+            
             return jsonify({
                 "ok": True, 
                 "history": history_list[:100], 
-                "todayCount": today_count,
+                "todayCount": today_saved_count,
+                "readToday": read_count,
+                "readRemain": read_remain,
                 "isAdmin": is_admin
             })
             
@@ -757,18 +740,17 @@ def history_api():
             
         all_docs = list(history_ref.where('email', '==', email_clean).stream())
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        today_count = 0
+        today_saved_count = 0
         
         for doc in all_docs:
             d = doc.to_dict()
             ca = d.get('createdAt')
             if ca and hasattr(ca, 'replace'):
                 if ca.replace(tzinfo=None) >= today_start:
-                    today_count += 1
+                    today_saved_count += 1
 
-        # Admin & Super Admin không bị giới hạn 100 câu/ngày
         if not is_admin:
-            remaining_quota_today = 100 - today_count
+            remaining_quota_today = 100 - today_saved_count
             if remaining_quota_today <= 0:
                 return jsonify({"ok": False, "error": "Đã đạt giới hạn lưu 100 câu trong ngày!"}), 429
             items_to_save = items[:remaining_quota_today]
@@ -784,15 +766,14 @@ def history_api():
                 'createdAt': firestore.SERVER_TIMESTAMP
             })
             
-        # Cuốn chiếu: Giữ lại tối đa 100 bản ghi mới nhất (trừ admin nếu muốn giữ nhiều hơn, tùy chọn)
-        all_docs_refresh = list(history_ref.where('email', '==', email_clean).stream())
-        if len(all_docs_refresh) > 100:
+        # Cuốn chiếu 100 câu
+        if len(all_docs) >= 100:
             def get_doc_time(doc):
                 ca = doc.to_dict().get('createdAt')
                 return ca.timestamp() if hasattr(ca, 'timestamp') else 0
                 
-            all_docs_refresh.sort(key=get_doc_time, reverse=True)
-            for old_doc in all_docs_refresh[100:]:
+            all_docs.sort(key=get_doc_time, reverse=True)
+            for old_doc in all_docs[99:]:
                 old_doc.reference.delete()
                 
         return jsonify({"ok": True, "saved": len(items_to_save)})

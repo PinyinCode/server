@@ -175,7 +175,8 @@ def get_pinyin_vocab(char):
     return ''
 
 def analyze_char(char):
-    if not char or len(char) != 1 or not ('\u4e00' <= char <= \u9fff) or not HAS_VOCAB:
+    # Đã sửa lỗi thiếu dấu nháy đơn ở \u9fff
+    if not char or len(char) != 1 or not ('\u4e00' <= char <= '\u9fff') or not HAS_VOCAB:
         return None
     try:
         result = {'char': char, 'pinyin': get_pinyin_vocab(char)}
@@ -525,7 +526,7 @@ def translate():
         if not user_doc.exists:
             return jsonify({"error": "Tài khoản không tồn tại"}), 404
             
-                user_data = user_doc.to_dict()
+        user_data = user_doc.to_dict()
         
         # ⭐ ƯU TIÊN ĐỌC 'role' TRƯỚC, sau đó mới đến 'tier' để tránh xung đột
         raw_role = user_data.get('role') or user_data.get('tier', 'trial')
@@ -568,10 +569,6 @@ def translate():
             
             if total_available <= 0 or used >= total_available:
                 return jsonify({"error": "Tài khoản của bạn đã hết quota token, vui lòng nạp thêm để tiếp tục sử dụng!"}), 403
-
-        else:
-            # super_admin: Không giới hạn token
-            pass
 
         source_lang = 'Chinese' if source == 'zh-CN' else 'Vietnamese'
         target_lang = 'Vietnamese' if target == 'vi' else 'Chinese'

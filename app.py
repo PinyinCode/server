@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - FIX SAFARI CORS)
-Bao gồm: Chấm điểm, Từ vựng, OTP, Firebase Delete, Xuất Excel.
+MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - TÍCH HỢP TOKEN DỊCH THUẬT)
 """
 
 from flask import Flask, request, jsonify
@@ -16,6 +15,7 @@ import random
 import base64
 import threading
 import traceback
+import requests # ⭐ ĐÃ THÊM THƯ VIỆN REQUESTS
 from datetime import datetime, timedelta
 
 # Thư viện OTP & Firebase & Excel
@@ -41,7 +41,6 @@ CORS(app, resources={
     }
 })
 
-# Bắt buộc phải có hàm này để Safari chấp nhận request POST kèm JSON
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -182,37 +181,28 @@ def analyze_char(char):
     try:
         result = {'char': char, 'pinyin': get_pinyin_vocab(char)}
         
-        # 1. Lấy nghĩa tiếng Việt
         try:
             vi = get_meaning(char)
             if vi: result['vi'] = vi
-        except Exception as e:
-            print(f"[Analyze] get_meaning error '{char}': {e}")
+        except Exception as e: pass
         
-        # 2. Lấy bộ thủ
         try:
             main_rad = get_radical_for_word(char)
             if main_rad: 
                 result['radical'] = {k: main_rad.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'strokes', 'position']}
-        except Exception as e:
-            print(f"[Analyze] get_radical error '{char}': {e}")
+        except Exception as e: pass
         
-        # 3. Phân tích các thành phần cấu tạo
         try:
             comps = _split_components(char)
             if comps: 
                 result['components'] = [{k: c.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'position']} for c in comps[:8]]
-        except Exception as e:
-            print(f"[Analyze] split_components error '{char}': {e}")
+        except Exception as e: pass
 
-        # 4. Lấy mẹo nhớ (ưu tiên AI, sau đó đến tĩnh)
         try:
             mnemonic = get_ai_mnemonic(char) or generate_mnemonic(char)
             if mnemonic: result['mnemonic'] = mnemonic
-        except Exception as e:
-            print(f"[Analyze] mnemonic error '{char}': {e}")
+        except Exception as e: pass
         
-        # 5. Lấy các chữ dễ nhầm
         try:
             sim_chars, diff_text = get_similar_chars(char)
             if sim_chars:
@@ -220,14 +210,11 @@ def analyze_char(char):
                     'list': [{'char': c, 'pinyin': get_pinyin_vocab(c), 'meaning': get_meaning(c)} for c in sim_chars if len(c)==1],
                     'diff': diff_text
                 }
-        except Exception as e:
-            print(f"[Analyze] similar_chars error '{char}': {e}")
+        except Exception as e: pass
             
         return result
         
     except Exception as e:
-        # Nếu có lỗi cực kỳ nghiêm trọng, vẫn trả về dữ liệu cơ bản nhất
-        print(f"[Analyze] CRITICAL error '{char}': {e}")
         return {'char': char, 'pinyin': get_pinyin_vocab(char)}
 
 # ==========================================================
@@ -368,17 +355,11 @@ def build_otp_email_html(otp, device_name, email):
 
 @app.route('/api/delete-user', methods=['POST', 'OPTIONS'])
 def delete_user():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-        
-    if not FIREBASE_READY: 
-        return jsonify({"success": False, "error": "Firebase chưa cấu hình"}), 503
-        
+    if request.method == 'OPTIONS': return jsonify({}), 200
+    if not FIREBASE_READY: return jsonify({"success": False, "error": "Firebase chưa cấu hình"}), 503
     data = request.json or {}
     email = data.get('email')
-    if not email: 
-        return jsonify({"success": False, "error": "Thiếu email"}), 400
-        
+    if not email: return jsonify({"success": False, "error": "Thiếu email"}), 400
     email_clean = email.strip().lower()
     try:
         db = firestore.client()
@@ -387,17 +368,12 @@ def delete_user():
             user_record = auth.get_user_by_email(email_clean)
             auth.delete_user(user_record.uid)
             deleted_auth = True
-        except firebase_admin.auth.UserNotFoundError: 
-            pass
-            
+        except firebase_admin.auth.UserNotFoundError: pass
         doc_ref = db.collection('allowed_users').document(email_clean)
         if doc_ref.get().exists:
             doc_ref.delete()
             deleted_fs = True
-            
-        if not deleted_auth and not deleted_fs: 
-            return jsonify({"success": False, "error": f"Không tìm thấy user {email_clean}"}), 404
-            
+        if not deleted_auth and not deleted_fs: return jsonify({"success": False, "error": f"Không tìm thấy user {email_clean}"}), 404
         return jsonify({"success": True, "message": f"Đã xóa user {email_clean}"})
     except Exception as e:
         traceback.print_exc()
@@ -406,29 +382,20 @@ def delete_user():
 
 @app.route('/api/device/send-otp', methods=['POST', 'OPTIONS'])
 def send_otp():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-        
-    if otp_collection is None: 
-        return jsonify({'ok': False, 'error': 'OTP service chưa sẵn sàng'}), 503
-        
+    if request.method == 'OPTIONS': return jsonify({}), 200
+    if otp_collection is None: return jsonify({'ok': False, 'error': 'OTP service chưa sẵn sàng'}), 503
     try:
         data = request.get_json(force=True, silent=True) or {}
         email, did, dname = data.get('email', ''), data.get('deviceId', 'unknown'), data.get('deviceName', 'Thiết bị')
-        if not email or '@' not in email: 
-            return jsonify({'ok': False, 'error': 'Email không hợp lệ'}), 400
-        
+        if not email or '@' not in email: return jsonify({'ok': False, 'error': 'Email không hợp lệ'}), 400
         el = email.lower().strip()
         now = datetime.utcnow()
-        
         if el in last_sent_map and (now - last_sent_map[el]).total_seconds() < 60:
             wait = int(60 - (now - last_sent_map[el]).total_seconds())
             return jsonify({'ok': False, 'error': f'Vui lòng đợi {wait} giây', 'waitSec': wait}), 429
-            
         otp_collection.delete_many({'email': el})
         otp = str(random.randint(100000, 999999))
         otp_collection.insert_one({'email': el, 'otp': otp, 'deviceId': did, 'deviceName': dname, 'attempts': 0, 'createdAt': now})
-        
         send_gmail_html(el, 'Your OTP Verification Code', build_otp_email_html(otp, dname, el))
         last_sent_map[el] = now
         return jsonify({'ok': True, 'message': 'Đã gửi mã OTP'})
@@ -442,14 +409,15 @@ def verify_otp():
         data = request.get_json(force=True, silent=True) or {}
         email, otp = data.get('email', ''), data.get('otp', '')
         if not email or not otp: return jsonify({'ok': False, 'error': 'Thiếu email hoặc OTP'}), 400
-        
         el = email.lower().strip()
         record = otp_collection.find_one({'email': el}, sort=[('createdAt', -1)])
-        
         if not record: return jsonify({'ok': False, 'error': 'OTP không tồn tại hoặc đã hết hạn'}), 400
+        
+        # Sửa lỗi cú pháp: datetime.utcnow() và định dạng JSON phản hồi chuẩn
         if datetime.utcnow() - record['createdAt'] > timedelta(minutes=10):
             otp_collection.delete_many({'email': el})
             return jsonify({'ok': False, 'error': 'OTP đã hết hạn'}), 400
+            
         if record.get('attempts', 0) >= 5:
             otp_collection.delete_many({'email': el})
             return jsonify({'ok': False, 'error': 'Quá nhiều lần thử'}), 429
@@ -465,8 +433,7 @@ def verify_otp():
 
 @app.route('/check', methods=['POST', 'OPTIONS'])
 def check():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
+    if request.method == 'OPTIONS': return jsonify({}), 200
     try:
         data = request.get_json(force=True, silent=True) or {}
         u, c = data.get('user_answer', ''), data.get('correct_answer', '')
@@ -483,25 +450,15 @@ def test_get():
 
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
+    if request.method == 'OPTIONS': return jsonify({}), 200
     try:
         data = request.get_json(force=True, silent=True) or {}
         char = data.get('char', '').strip()
-        if not char or len(char) != 1: 
-            return jsonify({'ok': False, 'error': 'Invalid char'}), 400
-            
+        if not char or len(char) != 1: return jsonify({'ok': False, 'error': 'Invalid char'}), 400
         res = analyze_char(char)
-        
-        if res:
-            return jsonify({'ok': True, 'data': res})
-        else:
-            # Trả về mã 200 thay vì 500 để Frontend không báo lỗi kết nối
-            return jsonify({'ok': False, 'error': 'Not found', 'char': char}), 200
-            
+        if res: return jsonify({'ok': True, 'data': res})
+        else: return jsonify({'ok': False, 'error': 'Not found', 'char': char}), 200
     except Exception as e:
-        print(f"[API /analyze] Lỗi: {e}")
-        # Trả về mã 200 kèm thông báo lỗi
         return jsonify({'ok': False, 'error': str(e), 'char': char}), 200
 
 @app.route('/vocab_test')
@@ -514,10 +471,7 @@ def vocab_test():
 def export_excel():
     EXCEL_PATH = "data/tu_vung_hsk.xlsx"
     OUTPUT_PATH = "data/vocab_meanings.json"
-    
-    if not os.path.exists(EXCEL_PATH):
-        return jsonify({"success": False, "error": f"Không tìm thấy {EXCEL_PATH}"}), 404
-        
+    if not os.path.exists(EXCEL_PATH): return jsonify({"success": False, "error": f"Không tìm thấy {EXCEL_PATH}"}), 404
     try:
         wb = load_workbook(EXCEL_PATH, data_only=True, read_only=True)
         result = {}
@@ -526,18 +480,13 @@ def export_excel():
             ws = wb[sheet_name]
             is_hsk79 = any(x in sheet_name for x in ['7', '8', '9'])
             col_zh, col_vi = 1, (4 if is_hsk79 else 5)
-            
             for row in ws.iter_rows(min_row=3, values_only=True):
                 if not row or len(row) <= col_vi: continue
                 zh = str(row[col_zh]).strip() if row[col_zh] else ""
                 vi = str(row[col_vi]).strip() if len(row) > col_vi and row[col_vi] else ""
-                if zh and vi and zh not in result:
-                    result[zh] = vi
+                if zh and vi and zh not in result: result[zh] = vi
         wb.close()
-        
-        with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
-            
+        with open(OUTPUT_PATH, "w", encoding="utf-8") as f: json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
         _do_load_vocab_meanings()
         return jsonify({"success": True, "message": f"Đã xuất {len(result)} từ vựng"})
     except Exception as e:
@@ -549,7 +498,6 @@ def export_excel():
 # ⭐ Đọc API Key từ biến môi trường DASHCOPE_API_KEY
 QWEN_API_KEY = os.environ.get("DASHCOPE_API_KEY") 
 
-# Nếu bạn muốn dùng fallback khi test local thì có thể thêm:
 if not QWEN_API_KEY:
     print("[WARNING] Chưa cấu hình DASHCOPE_API_KEY trong biến môi trường!")
 
@@ -579,11 +527,15 @@ def translate():
             
         user_data = user_doc.to_dict()
         
-        # Kiểm tra token
+        # ⭐ KIỂM TRA TOKEN (Sửa lỗi ngắt dòng gán biến `quota`)
         if user_data.get('role') != 'admin':
             quota = user_data.get('tokenQuota', 20000)
+            bonus = user_data.get('bonusTokens', 0)  # Lấy token mua thêm
             used = user_data.get('tokensUsed', 0)
-            if used >= quota:
+            
+            total_available = quota + bonus  # Tổng token được phép dùng
+            
+            if used >= total_available:
                 return jsonify({"error": "Bạn đã hết token, vui lòng mua thêm!"}), 403
 
         # Gọi Qwen Dịch
@@ -599,7 +551,6 @@ def translate():
         
         res = requests.post(QWEN_URL, json=payload, headers=headers, timeout=15)
         res_data = res.json()
-        
         if 'error' in res_data:
             return jsonify({"error": res_data['error']['message']}), 500
             
@@ -621,6 +572,7 @@ def translate():
     except Exception as e:
         print(f"[Translate API] Lỗi: {e}")
         return jsonify({"error": str(e)}), 500
+
 @app.route('/health')
 def health():
     return jsonify({
@@ -641,7 +593,7 @@ def warmup():
 
 @app.route('/')
 def index():
-    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.2-NoCORS', 'status': 'Running'})
+    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.3-Translate-Token', 'status': 'Running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

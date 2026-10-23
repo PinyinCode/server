@@ -543,6 +543,84 @@ def export_excel():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+# ==========================================================
+# PHẦN 7: TRANSLATE API (TÍCH HỢP TOKEN & QWEN)
+# ==========================================================
+# ⭐ Đọc API Key từ biến môi trường DASHCOPE_API_KEY
+QWEN_API_KEY = os.environ.get("DASHCOPE_API_KEY") 
+
+# Nếu bạn muốn dùng fallback khi test local thì có thể thêm:
+if not QWEN_API_KEY:
+    print("[WARNING] Chưa cấu hình DASHCOPE_API_KEY trong biến môi trường!")
+
+QWEN_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
+
+@app.route('/api/translate', methods=['POST', 'OPTIONS'])
+def translate():
+    if request.method == 'OPTIONS': return jsonify({}), 200
+    if not FIREBASE_READY: return jsonify({"error": "Firebase chưa cấu hình"}), 503
+    
+    data = request.json or {}
+    text = data.get('text')
+    source = data.get('source', 'vi')
+    target = data.get('target', 'zh-CN')
+    email = data.get('email')
+
+    if not text or not email:
+        return jsonify({"error": "Thiếu dữ liệu (text hoặc email)"}), 400
+
+    try:
+        db = firestore.client()
+        user_ref = db.collection('allowed_users').document(email)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({"error": "Tài khoản không tồn tại"}), 404
+            
+        user_data = user_doc.to_dict()
+        
+        # Kiểm tra token
+        if user_data.get('role') != 'admin':
+            quota = user_data.get('tokenQuota', 20000)
+            used = user_data.get('tokensUsed', 0)
+            if used >= quota:
+                return jsonify({"error": "Bạn đã hết token, vui lòng mua thêm!"}), 403
+
+        # Gọi Qwen Dịch
+        source_lang = 'Chinese' if source == 'zh-CN' else 'Vietnamese'
+        target_lang = 'Vietnamese' if target == 'vi' else 'Chinese'
+        
+        payload = {
+            "model": "qwen-mt-flash",
+            "messages": [{"role": "user", "content": text}],
+            "translation_options": {"source_lang": source_lang, "target_lang": target_lang}
+        }
+        headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
+        
+        res = requests.post(QWEN_URL, json=payload, headers=headers, timeout=15)
+        res_data = res.json()
+        
+        if 'error' in res_data:
+            return jsonify({"error": res_data['error']['message']}), 500
+            
+        translated_text = res_data['choices'][0]['message']['content']
+        tokens_used = res_data.get('usage', {}).get('total_tokens', 0)
+        
+        # Trừ token trên Firestore (Chỉ trừ nếu không phải Admin)
+        if user_data.get('role') != 'admin' and tokens_used > 0:
+            user_ref.update({
+                'tokensUsed': firestore.Increment(tokens_used),
+                'lastTokenUsedAt': firestore.SERVER_TIMESTAMP
+            })
+            
+        return jsonify({
+            "translated": translated_text,
+            "tokensUsed": tokens_used
+        })
+
+    except Exception as e:
+        print(f"[Translate API] Lỗi: {e}")
+        return jsonify({"error": str(e)}), 500
 @app.route('/health')
 def health():
     return jsonify({

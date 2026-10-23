@@ -529,23 +529,38 @@ def translate():
             quota = user_data.get('tokenQuota', 20000)
             bonus = user_data.get('bonusTokens', 0)
             used = user_data.get('tokensUsed', 0)
-            
             total_available = quota + bonus
-            
             if used >= total_available:
                 return jsonify({"error": "Bạn đã hết token, vui lòng mua thêm!"}), 403
 
         source_lang = 'Chinese' if source == 'zh-CN' else 'Vietnamese'
         target_lang = 'Vietnamese' if target == 'vi' else 'Chinese'
         
-        # ⭐ BẢO VỆ TỪ TIẾNG ANH: Tạm ẩn các từ tiếng Anh để Qwen không dịch sang tiếng Trung
         placeholders = {}
-        def protect_replacer(match):
-            ph = f"__ENG_{len(placeholders)}__"
-            placeholders[ph] = match.group(0)
-            return ph
-        
-        protected_text = re.sub(r'\b[A-Za-z][A-Za-z0-9+#.-]*\b', protect_replacer, text)
+        protected_text = text
+
+        # ⭐ CHỈ BẢO VỆ TỪ TIẾNG ANH KHI DỊCH TỪ TRUNG SANG VIỆT HOẶC CÁC TỪ CHỮ HOA THUẦN TÚY (NHƯ GDP, TTXVN, Antwerp)
+        # Tránh bắt nhầm các từ tiếng Việt không dấu (như: theo, doanh, vai, lao)
+        if source == 'zh-CN':
+            def protect_replacer(match):
+                ph = f"__ENG_{len(placeholders)}__"
+                placeholders[ph] = match.group(0)
+                return ph
+            # Chỉ bắt các từ tiếng Anh thuần không chứa ký tự tiếng Trung
+            protected_text = re.sub(r'\b[A-Za-z][A-Za-z0-9+#.-]*\b', protect_replacer, text)
+        else:
+            # Đối với Việt -> Trung: Chỉ bảo vệ các từ viết hoa toàn bộ (viết tắt như GDP, VIP) hoặc chứa ký tự đặc biệt
+            def protect_uppercase_replacer(match):
+                word = match.group(0)
+                # Chỉ bảo vệ nếu là từ viết hoa toàn bộ (từ 2 ký tự trở lên, ví dụ: GDP, TTXVN, Antwerp)
+                if word.isupper() or (len(word) > 3 and word[0].isupper() and not any(c in 'àáâãèéêìíòóôõùúăđĩũơƯĂẠẢẤẦẨẪẬẮẰẲẴẶẸẺẼỀỀỂưăạảấầẩẫậắằẳẵặẹẻẽềếểỄỆỈỊỌỎỐỒỔỖỘỚỜỞỠỢỤỦỨỪỬỮỰỲỴÝỶỸửữựỳỵỷỹ' for c in word)):
+                    ph = f"__ENG_{len(placeholders)}__"
+                    placeholders[ph] = word
+                    return ph
+                return word
+
+            # Bắt các từ viết hoa / thuật ngữ viết tắt tiếng Anh
+            protected_text = re.sub(r'\b[A-Za-z0-9+#.-]+\b', protect_uppercase_replacer, text)
 
         payload = {
             "model": "qwen-mt-flash",
@@ -561,7 +576,7 @@ def translate():
             
         translated_text = res_data['choices'][0]['message']['content']
         
-        # ⭐ KHÔI PHỤC LẠI TỪ TIẾNG ANH GỐC SAU KHI DỊCH XONG
+        # KHÔI PHỤC LẠI TỪ BẢO VỆ
         for ph, original in placeholders.items():
             translated_text = translated_text.replace(ph, original)
 
@@ -581,6 +596,7 @@ def translate():
     except Exception as e:
         print(f"[Translate API] Lỗi: {e}")
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/health')
 def health():

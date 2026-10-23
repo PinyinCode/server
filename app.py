@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - TÍCH HỢP BẢO VỆ TỪ TIẾNG ANH & TOKEN)
+MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - TÍCH HỢP BẢO VỆ TỪ, VIẾT TẮT & BATCH TOKEN)
 """
 
 from flask import Flask, request, jsonify
@@ -177,32 +177,26 @@ def get_pinyin_vocab(char):
 def analyze_char(char):
     if not char or len(char) != 1 or not ('\u4e00' <= char <= '\u9fff') or not HAS_VOCAB:
         return None
-        
     try:
         result = {'char': char, 'pinyin': get_pinyin_vocab(char)}
-        
         try:
             vi = get_meaning(char)
             if vi: result['vi'] = vi
-        except Exception as e: pass
-        
+        except: pass
         try:
             main_rad = get_radical_for_word(char)
             if main_rad: 
                 result['radical'] = {k: main_rad.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'strokes', 'position']}
-        except Exception as e: pass
-        
+        except: pass
         try:
             comps = _split_components(char)
             if comps: 
                 result['components'] = [{k: c.get(k, '') for k in ['zh', 'pinyin', 'meaning', 'position']} for c in comps[:8]]
-        except Exception as e: pass
-
+        except: pass
         try:
             mnemonic = get_ai_mnemonic(char) or generate_mnemonic(char)
             if mnemonic: result['mnemonic'] = mnemonic
-        except Exception as e: pass
-        
+        except: pass
         try:
             sim_chars, diff_text = get_similar_chars(char)
             if sim_chars:
@@ -210,11 +204,9 @@ def analyze_char(char):
                     'list': [{'char': c, 'pinyin': get_pinyin_vocab(c), 'meaning': get_meaning(c)} for c in sim_chars if len(c)==1],
                     'diff': diff_text
                 }
-        except Exception as e: pass
-            
+        except: pass
         return result
-        
-    except Exception as e:
+    except:
         return {'char': char, 'pinyin': get_pinyin_vocab(char)}
 
 # ==========================================================
@@ -235,7 +227,7 @@ def get_corrector():
             from pycorrector import MacBertCorrector
             _corrector = MacBertCorrector("shibing624/macbert4csc-base-chinese")
             return _corrector
-        except Exception:
+        except:
             _corrector_failed = True
             return None
 
@@ -303,7 +295,6 @@ def grade(user_answer, correct_answer):
         except: pass
         
     if not errors: errors, _ = find_diff(u, c)
-    
     max_len = max(len(u), len(c))
     ratio = max(0, min(1, 1 - (len(errors) / max_len))) if max_len > 0 else 0
     
@@ -328,7 +319,6 @@ def send_gmail_html(to, subject, html):
     sub_enc = "=?UTF-8?B?" + base64.b64encode(subject.encode('utf-8')).decode('utf-8') + "?="
     msg = f'From: "Account Verification" <{sender}>\nTo: {to}\nSubject: {sub_enc}\nMIME-Version: 1.0\nContent-Type: text/html; charset=UTF-8\nContent-Transfer-Encoding: base64\n\n{base64.b64encode(html.encode("utf-8")).decode("utf-8")}'
     encoded = base64.urlsafe_b64encode(msg.encode("utf-8")).decode("utf-8")
-    
     service.users().messages().send(userId='me', body={'raw': encoded}).execute()
 
 def build_otp_email_html(otp, device_name, email):
@@ -352,7 +342,6 @@ def build_otp_email_html(otp, device_name, email):
 # ==========================================================
 # PHẦN 6: ROUTES
 # ==========================================================
-
 @app.route('/api/delete-user', methods=['POST', 'OPTIONS'])
 def delete_user():
     if request.method == 'OPTIONS': return jsonify({}), 200
@@ -368,7 +357,7 @@ def delete_user():
             user_record = auth.get_user_by_email(email_clean)
             auth.delete_user(user_record.uid)
             deleted_auth = True
-        except firebase_admin.auth.UserNotFoundError: pass
+        except: pass
         doc_ref = db.collection('allowed_users').document(email_clean)
         if doc_ref.get().exists:
             doc_ref.delete()
@@ -378,7 +367,6 @@ def delete_user():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
-
 
 @app.route('/api/device/send-otp', methods=['POST', 'OPTIONS'])
 def send_otp():
@@ -412,19 +400,15 @@ def verify_otp():
         el = email.lower().strip()
         record = otp_collection.find_one({'email': el}, sort=[('createdAt', -1)])
         if not record: return jsonify({'ok': False, 'error': 'OTP không tồn tại hoặc đã hết hạn'}), 400
-        
         if datetime.utcnow() - record['createdAt'] > timedelta(minutes=10):
             otp_collection.delete_many({'email': el})
             return jsonify({'ok': False, 'error': 'OTP đã hết hạn'}), 400
-            
         if record.get('attempts', 0) >= 5:
             otp_collection.delete_many({'email': el})
             return jsonify({'ok': False, 'error': 'Quá nhiều lần thử'}), 429
-            
         if str(record['otp']) != str(otp).strip():
             otp_collection.update_one({'_id': record['_id']}, {'$inc': {'attempts': 1}})
             return jsonify({'ok': False, 'error': 'Mã OTP không đúng', 'attemptsLeft': 5 - (record.get('attempts', 0) + 1)}), 400
-            
         otp_collection.delete_many({'email': el})
         return jsonify({'ok': True, 'message': 'Xác thực thành công'})
     except Exception as e:
@@ -492,7 +476,7 @@ def export_excel():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ==========================================================
-# PHẦN 7: TRANSLATE API (TÍCH HỢP TOKEN & QWEN & BẢO VỆ TIẾNG ANH)
+# PHẦN 7: TRANSLATE API (TÍCH HỢP TOKEN & QWEN & MỞ RỘNG VIẾT TẮT)
 # ==========================================================
 QWEN_API_KEY = os.environ.get("DASHCOPE_API_KEY") 
 
@@ -500,6 +484,24 @@ if not QWEN_API_KEY:
     print("[WARNING] Chưa cấu hình DASHCOPE_API_KEY trong biến môi trường!")
 
 QWEN_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
+
+VIETNAMESE_ABBREVIATIONS = {
+    r'\bTTXVN\b': 'Thông tấn xã Việt Nam',
+    r'\bVTV\b': 'Đài Truyền hình Việt Nam',
+    r'\bVOV\b': 'Đài Tiếng nói Việt Nam',
+    r'\bTP\.?HCM\b': 'Thành phố Hồ Chí Minh',
+    r'\bUBND\b': 'Ủy ban nhân dân',
+    r'\bHĐND\b': 'Hội đồng nhân dân',
+    r'\bBCT\b': 'Bộ Công Thương',
+    r'\bBTC\b': 'Bộ Tài chính',
+    r'\bBYT\b': 'Bộ Y tế',
+    r'\bBGDĐT\b': 'Bộ Giáo dục và Đào tạo',
+    r'\bBCA\b': 'Bộ Công an',
+    r'\bBQP\b': 'Bộ Quốc phòng',
+    r'\bTCT\b': 'Tổng cục Thuế',
+    r'\bXNK\b': 'Xuất nhập khẩu',
+    r'\bOCOP\b': 'Mỗi xã một sản phẩm',
+}
 
 @app.route('/api/translate', methods=['POST', 'OPTIONS'])
 def translate():
@@ -536,31 +538,19 @@ def translate():
         source_lang = 'Chinese' if source == 'zh-CN' else 'Vietnamese'
         target_lang = 'Vietnamese' if target == 'vi' else 'Chinese'
         
+        processed_text = text
+        if source == 'vi':
+            for pattern, replacement in VIETNAMESE_ABBREVIATIONS.items():
+                processed_text = re.sub(pattern, replacement, processed_text, flags=re.IGNORECASE)
+
         placeholders = {}
-        protected_text = text
+        def protect_english_words(match):
+            word = match.group(0)
+            ph = f"__ENG_{len(placeholders)}__"
+            placeholders[ph] = word
+            return ph
 
-        # ⭐ CHỈ BẢO VỆ TỪ TIẾNG ANH KHI DỊCH TỪ TRUNG SANG VIỆT HOẶC CÁC TỪ CHỮ HOA THUẦN TÚY (NHƯ GDP, TTXVN, Antwerp)
-        # Tránh bắt nhầm các từ tiếng Việt không dấu (như: theo, doanh, vai, lao)
-        if source == 'zh-CN':
-            def protect_replacer(match):
-                ph = f"__ENG_{len(placeholders)}__"
-                placeholders[ph] = match.group(0)
-                return ph
-            # Chỉ bắt các từ tiếng Anh thuần không chứa ký tự tiếng Trung
-            protected_text = re.sub(r'\b[A-Za-z][A-Za-z0-9+#.-]*\b', protect_replacer, text)
-        else:
-            # Đối với Việt -> Trung: Chỉ bảo vệ các từ viết hoa toàn bộ (viết tắt như GDP, VIP) hoặc chứa ký tự đặc biệt
-            def protect_uppercase_replacer(match):
-                word = match.group(0)
-                # Chỉ bảo vệ nếu là từ viết hoa toàn bộ (từ 2 ký tự trở lên, ví dụ: GDP, TTXVN, Antwerp)
-                if word.isupper() or (len(word) > 3 and word[0].isupper() and not any(c in 'àáâãèéêìíòóôõùúăđĩũơƯĂẠẢẤẦẨẪẬẮẰẲẴẶẸẺẼỀỀỂưăạảấầẩẫậắằẳẵặẹẻẽềếểỄỆỈỊỌỎỐỒỔỖỘỚỜỞỠỢỤỦỨỪỬỮỰỲỴÝỶỸửữựỳỵỷỹ' for c in word)):
-                    ph = f"__ENG_{len(placeholders)}__"
-                    placeholders[ph] = word
-                    return ph
-                return word
-
-            # Bắt các từ viết hoa / thuật ngữ viết tắt tiếng Anh
-            protected_text = re.sub(r'\b[A-Za-z0-9+#.-]+\b', protect_uppercase_replacer, text)
+        protected_text = re.sub(r'\b[A-Z][a-z]+(?:\s*-\s*[A-Z][a-z]+)*\b|\b[A-Z]{2,4}\b', protect_english_words, processed_text)
 
         payload = {
             "model": "qwen-mt-flash",
@@ -569,14 +559,13 @@ def translate():
         }
         headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
         
-        res = requests.post(QWEN_URL, json=payload, headers=headers, timeout=15)
+        res = requests.post(QWEN_URL, json=payload, headers=headers, timeout=25)
         res_data = res.json()
         if 'error' in res_data:
             return jsonify({"error": res_data['error']['message']}), 500
             
         translated_text = res_data['choices'][0]['message']['content']
         
-        # KHÔI PHỤC LẠI TỪ BẢO VỆ
         for ph, original in placeholders.items():
             translated_text = translated_text.replace(ph, original)
 
@@ -597,7 +586,6 @@ def translate():
         print(f"[Translate API] Lỗi: {e}")
         return jsonify({"error": str(e)}), 500
 
-
 @app.route('/health')
 def health():
     return jsonify({
@@ -605,10 +593,7 @@ def health():
         'model_loaded': _corrector is not None,
         'firebase': FIREBASE_READY,
         'mongo': otp_collection is not None,
-        'has_vocab': HAS_VOCAB,
-        'ai_mnemonics_loaded': len(_AI_MNEMONICS),
-        'vocab_meanings_loaded': len(_VOCAB_MEANINGS),
-        'similar_chars_loaded': len(_SIMILAR_CHARS)
+        'has_vocab': HAS_VOCAB
     })
 
 @app.route('/warmup')
@@ -618,7 +603,7 @@ def warmup():
 
 @app.route('/')
 def index():
-    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.4-Translate-Token-Eng', 'status': 'Running'})
+    return jsonify({'name': 'Mega API 5-in-1', 'version': '7.5-Optimized', 'status': 'Running'})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

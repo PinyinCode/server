@@ -718,7 +718,7 @@ def history_api():
 
             docs = history_ref.where('email', '==', email_clean).stream()
             history_list = []
-            today_start = now_vn.replace(hour=0, minute=0, second=0, microsecond=0) # Sửa thành giờ VN
+            today_start = now_vn.replace(hour=0, minute=0, second=0, microsecond=0)
             today_saved_count = 0
             
             for doc in docs:
@@ -727,7 +727,6 @@ def history_api():
                 created_at = d.get('createdAt')
                 
                 if hasattr(created_at, 'strftime'):
-                    # Trả về chuỗi thời gian để frontend tự format
                     d['createdAtStr'] = created_at.strftime('%Y-%m-%d %H:%M:%S')
                     d['sortTime'] = created_at.timestamp()
                     if created_at.replace(tzinfo=None) >= today_start:
@@ -738,8 +737,28 @@ def history_api():
                     
                 d['createdAt'] = d['createdAtStr']
                 history_list.append(d)
+            
+            # ⭐ SẮP XẾP THÔNG MINH (Đã sửa lỗi thụt lề)
+            # 1. Tìm thời gian mới nhất của từng nhóm (groupId)
+            group_latest_times = {}
+            for d in history_list:
+                gid = str(d.get('groupId', 'unknown'))
+                t = d.get('sortTime', 0)
+                if gid not in group_latest_times or t > group_latest_times[gid]:
+                    group_latest_times[gid] = t
+            
+            # 2. Hàm sắp xếp: Ưu tiên nhóm mới nhất, sau đó đến STT tăng dần
+            def smart_sort_key(d):
+                gid = str(d.get('groupId', 'unknown'))
+                group_time = group_latest_times.get(gid, 0)
                 
-            history_list.sort(key=lambda x: x.get('sortTime', 0), reverse=True)
+                stt_str = str(d.get('stt', ''))
+                stt_num = int(stt_str) if stt_str.isdigit() else 9999
+                
+                # Dấu âm (-) ở group_time để sắp xếp nhóm mới nhất lên đầu
+                return (-group_time, stt_num)
+                
+            history_list.sort(key=smart_sort_key)
             
             if not is_admin:
                 read_count += 1
@@ -805,14 +824,15 @@ def history_api():
         for item in items_to_save:
             history_ref.add({
                 'email': email_clean,
+                'stt': item.get('stt', ''),         # ⭐ Lưu STT
+                'groupId': item.get('groupId', ''), # ⭐ Lưu Group ID
                 'text_vi': item.get('vi') or item.get('text_vi', ''),
                 'text_zh': item.get('zh') or item.get('text_zh', ''),
                 'pinyin': item.get('pinyin', ''),
                 'createdAt': firestore.SERVER_TIMESTAMP
             })
             
-        # Giới hạn số câu lưu trữ tối đa trong Firestore (để tránh phình to)
-        # Ví dụ: Chỉ giữ lại 150 câu gần nhất
+        # Giới hạn số câu lưu trữ tối đa trong Firestore
         if len(all_docs) >= 150:
             def get_doc_time(doc):
                 ca = doc.to_dict().get('createdAt')

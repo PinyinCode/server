@@ -535,8 +535,10 @@ def translate():
         is_expired = False
         if expires_at:
             try:
+                # ⭐ Sử dụng giờ VN để kiểm tra hết hạn
+                now_vn = datetime.utcnow() + timedelta(hours=7)
                 exp_date = expires_at if hasattr(expires_at, 'strftime') else datetime.strptime(str(expires_at)[:10], '%Y-%m-%d')
-                if datetime.utcnow() > exp_date:
+                if now_vn > exp_date:
                     is_expired = True
             except: 
                 pass
@@ -544,12 +546,15 @@ def translate():
         # ═══════════════════════════════════════════════════════
         # 1. TÍNH QUOTA VÀ RESET ĐỊNH KỲ
         # ═══════════════════════════════════════════════════════
+        # ⭐ Tạo biến thời gian chuẩn VN dùng chung
+        now_vn = datetime.utcnow() + timedelta(hours=7)
+
         if role == 'super_admin':
             quota = 999999999
             used = 0
         elif role == 'admin':
             quota = 20000
-            today_str = datetime.utcnow().strftime('%Y-%m-%d')
+            today_str = now_vn.strftime('%Y-%m-%d') # Sửa thành giờ VN
             last_reset = user_data.get('lastTokenResetDate', '')
             used = user_data.get('tokensUsed', 0)
             if last_reset != today_str:
@@ -564,7 +569,7 @@ def translate():
             used = user_data.get('tokensUsed', 0)
         else:
             quota = user_data.get('tokenQuota', 10000)
-            current_month = datetime.utcnow().strftime('%Y-%m')
+            current_month = now_vn.strftime('%Y-%m') # Sửa thành giờ VN
             last_reset_month = user_data.get('lastTokenResetMonth', '')
             used = user_data.get('tokensUsed', 0)
             
@@ -628,21 +633,17 @@ def translate():
         tokens_used = res_data.get('usage', {}).get('total_tokens', 0)
         
         if role != 'super_admin' and tokens_used > 0:
-            # ⭐ Bước 1: Tính xem cần trừ bao nhiêu vào bonus, bao nhiêu vào quota
             bonus_to_deduct = min(bonus, tokens_used)
             remaining_to_deduct = tokens_used - bonus_to_deduct
             
             update_data = {'lastTokenUsedAt': firestore.SERVER_TIMESTAMP}
             
-            # ⭐ Bước 2: Trừ bonus trước (nếu có)
             if bonus_to_deduct > 0:
                 update_data['bonusTokens'] = firestore.Increment(-bonus_to_deduct)
             
-            # ⭐ Bước 3: Nếu bonus không đủ, trừ tiếp vào quota tháng
             if remaining_to_deduct > 0:
                 update_data['tokensUsed'] = firestore.Increment(remaining_to_deduct)
             
-            # Cập nhật Firestore
             user_ref.update(update_data)
             
             print(f"[Translate] Token dùng: {tokens_used} | "
@@ -658,8 +659,10 @@ def translate():
         print(f"[Translate API] Lỗi: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
 # ==========================================================
-# PHẦN 8: LỊCH SỬ DỊCH (KIỂM TRA QUYỀN CHÍNH XÁC & GIỚI HẠN 100 LƯỢT)
+# PHẦN 8: LỊCH SỬ DỊCH (KIỂM TRA QUYỀN & GIỚI HẠN ĐỌC 250 / GHI 150)
 # ==========================================================
 @app.route('/api/history', methods=['POST', 'GET', 'OPTIONS'])
 def history_api():
@@ -686,18 +689,18 @@ def history_api():
     
     if user_doc.exists:
         ud = user_doc.to_dict()
-        # Lấy chính xác giá trị role (nếu không có thì mặc định là 'user')
         user_role = str(ud.get('role', 'user')).strip().lower()
     
-    # CHỈ CÓ admin hoặc super_admin mới được coi là admin thực sự
     is_admin = (user_role in ['admin', 'super_admin', 'super-admin'])
-    
     is_get_request = (request.method == 'GET') or (str(data.get('_method', '')).upper() == 'GET')
     
     # ⭐ XỬ LÝ LẤY LỊCH SỬ (GET)
     if is_get_request:
         try:
-            today_str = datetime.utcnow().strftime('%Y-%m-%d')
+            # ⭐ Sử dụng giờ VN (GMT+7)
+            now_vn = datetime.utcnow() + timedelta(hours=7)
+            today_str = now_vn.strftime('%Y-%m-%d')
+            
             user_data = user_doc.to_dict() if user_doc.exists else {}
             last_read_date = user_data.get('lastReadDate', '')
             read_count = user_data.get('historyReadToday', 0)
@@ -705,17 +708,17 @@ def history_api():
             if last_read_date != today_str:
                 read_count = 0
                 
-            # Chặn nếu là user thường và đã hết 100 lượt đọc trong ngày
-            if not is_admin and read_count >= 100:
+            # ⭐ Chặn nếu user đã hết 250 lượt đọc trong ngày
+            if not is_admin and read_count >= 250:
                 return jsonify({
                     "ok": False, 
-                    "error": "Bạn đã hết 100 lượt đọc lịch sử trong ngày hôm nay!",
+                    "error": "Bạn đã hết 250 lượt đọc lịch sử trong ngày hôm nay!",
                     "readRemain": 0
                 }), 429
 
             docs = history_ref.where('email', '==', email_clean).stream()
             history_list = []
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start = now_vn.replace(hour=0, minute=0, second=0, microsecond=0) # Sửa thành giờ VN
             today_saved_count = 0
             
             for doc in docs:
@@ -724,6 +727,7 @@ def history_api():
                 created_at = d.get('createdAt')
                 
                 if hasattr(created_at, 'strftime'):
+                    # Trả về chuỗi thời gian để frontend tự format
                     d['createdAtStr'] = created_at.strftime('%Y-%m-%d %H:%M:%S')
                     d['sortTime'] = created_at.timestamp()
                     if created_at.replace(tzinfo=None) >= today_start:
@@ -737,7 +741,6 @@ def history_api():
                 
             history_list.sort(key=lambda x: x.get('sortTime', 0), reverse=True)
             
-            # Tăng số lượt đọc nếu là user thường
             if not is_admin:
                 read_count += 1
                 user_ref.set({
@@ -745,11 +748,12 @@ def history_api():
                     'lastReadDate': today_str
                 }, merge=True)
             
-            read_remain = 999999 if is_admin else (100 - read_count)
+            # ⭐ Tính số lượt đọc còn lại dựa trên mốc 250
+            read_remain = 999999 if is_admin else (250 - read_count)
             
             return jsonify({
                 "ok": True, 
-                "history": history_list[:100], 
+                "history": history_list[:150], # ⭐ Trả về tối đa 150 câu để khớp với giới hạn lưu
                 "todayCount": today_saved_count,
                 "readToday": read_count,
                 "readRemain": read_remain,
@@ -776,7 +780,10 @@ def history_api():
             items = [items]
             
         all_docs = list(history_ref.where('email', '==', email_clean).stream())
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # ⭐ Sử dụng giờ VN (GMT+7) để xác định "hôm nay"
+        now_vn = datetime.utcnow() + timedelta(hours=7)
+        today_start = now_vn.replace(hour=0, minute=0, second=0, microsecond=0)
         today_saved_count = 0
         
         for doc in all_docs:
@@ -786,10 +793,11 @@ def history_api():
                 if ca.replace(tzinfo=None) >= today_start:
                     today_saved_count += 1
 
+        # ⭐ Kiểm tra giới hạn lưu 150 câu/ngày
         if not is_admin:
-            remaining_quota_today = 100 - today_saved_count
+            remaining_quota_today = 150 - today_saved_count
             if remaining_quota_today <= 0:
-                return jsonify({"ok": False, "error": "Đã đạt giới hạn lưu 100 câu trong ngày!"}), 429
+                return jsonify({"ok": False, "error": "Đã đạt giới hạn lưu 150 câu trong ngày!"}), 429
             items_to_save = items[:remaining_quota_today]
         else:
             items_to_save = items
@@ -803,13 +811,15 @@ def history_api():
                 'createdAt': firestore.SERVER_TIMESTAMP
             })
             
-        if len(all_docs) >= 100:
+        # Giới hạn số câu lưu trữ tối đa trong Firestore (để tránh phình to)
+        # Ví dụ: Chỉ giữ lại 150 câu gần nhất
+        if len(all_docs) >= 150:
             def get_doc_time(doc):
                 ca = doc.to_dict().get('createdAt')
                 return ca.timestamp() if hasattr(ca, 'timestamp') else 0
                 
             all_docs.sort(key=get_doc_time, reverse=True)
-            for old_doc in all_docs[99:]:
+            for old_doc in all_docs[149:]:
                 old_doc.reference.delete()
                 
         return jsonify({"ok": True, "saved": len(items_to_save)})
@@ -817,8 +827,6 @@ def history_api():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(e)}), 500
-
-
 
 @app.route('/health')
 def health():

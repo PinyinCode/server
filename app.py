@@ -498,8 +498,10 @@ VIETNAMESE_ABBREVIATIONS = {
 
 @app.route('/api/translate', methods=['POST', 'OPTIONS'])
 def translate():
-    if request.method == 'OPTIONS': return jsonify({}), 200
-    if not FIREBASE_READY: return jsonify({"error": "Firebase chưa cấu hình"}), 503
+    if request.method == 'OPTIONS': 
+        return jsonify({}), 200
+    if not FIREBASE_READY: 
+        return jsonify({"error": "Firebase chưa cấu hình"}), 503
     
     data = request.json or {}
     text = data.get('text')
@@ -536,8 +538,12 @@ def translate():
                 exp_date = expires_at if hasattr(expires_at, 'strftime') else datetime.strptime(str(expires_at)[:10], '%Y-%m-%d')
                 if datetime.utcnow() > exp_date:
                     is_expired = True
-            except: pass
+            except: 
+                pass
 
+        # ═══════════════════════════════════════════════════════
+        # 1. TÍNH QUOTA VÀ RESET ĐỊNH KỲ
+        # ═══════════════════════════════════════════════════════
         if role == 'super_admin':
             quota = 999999999
             used = 0
@@ -570,12 +576,19 @@ def translate():
                     'tokenQuota': 20000
                 })
                 
+        # ═══════════════════════════════════════════════════════
+        # 2. TÍNH TOKEN KHẢ DỤNG (Bonus + Quota tháng còn lại)
+        # ═══════════════════════════════════════════════════════
         bonus = user_data.get('bonusTokens', 0)
-        total_available = quota + bonus
+        monthly_remain = max(0, quota - used)
+        total_available = monthly_remain + bonus
         
-        if role != 'super_admin' and (total_available <= 0 or used >= total_available):
+        if role != 'super_admin' and total_available <= 0:
             return jsonify({"error": "Tài khoản của bạn đã hết quota token, vui lòng nạp thêm để tiếp tục sử dụng!"}), 403
 
+        # ═══════════════════════════════════════════════════════
+        # 3. CHUẨN BỊ VĂN BẢN DỊCH
+        # ═══════════════════════════════════════════════════════
         source_lang = 'Chinese' if source == 'zh-CN' else 'Vietnamese'
         target_lang = 'Vietnamese' if target == 'vi' else 'Chinese'
         
@@ -609,12 +622,32 @@ def translate():
         for ph, original in placeholders.items():
             translated_text = translated_text.replace(ph, original)
 
+        # ═══════════════════════════════════════════════════════
+        # 4. TRỪ TOKEN (ƯU TIÊN BONUS TRƯỚC, SAU ĐÓ MỚI QUOTA THÁNG)
+        # ═══════════════════════════════════════════════════════
         tokens_used = res_data.get('usage', {}).get('total_tokens', 0)
+        
         if role != 'super_admin' and tokens_used > 0:
-            user_ref.update({
-                'tokensUsed': firestore.Increment(tokens_used),
-                'lastTokenUsedAt': firestore.SERVER_TIMESTAMP
-            })
+            # ⭐ Bước 1: Tính xem cần trừ bao nhiêu vào bonus, bao nhiêu vào quota
+            bonus_to_deduct = min(bonus, tokens_used)
+            remaining_to_deduct = tokens_used - bonus_to_deduct
+            
+            update_data = {'lastTokenUsedAt': firestore.SERVER_TIMESTAMP}
+            
+            # ⭐ Bước 2: Trừ bonus trước (nếu có)
+            if bonus_to_deduct > 0:
+                update_data['bonusTokens'] = firestore.Increment(-bonus_to_deduct)
+            
+            # ⭐ Bước 3: Nếu bonus không đủ, trừ tiếp vào quota tháng
+            if remaining_to_deduct > 0:
+                update_data['tokensUsed'] = firestore.Increment(remaining_to_deduct)
+            
+            # Cập nhật Firestore
+            user_ref.update(update_data)
+            
+            print(f"[Translate] Token dùng: {tokens_used} | "
+                  f"Trừ bonus: {bonus_to_deduct} | "
+                  f"Trừ quota: {remaining_to_deduct}")
             
         return jsonify({
             "translated": translated_text,
@@ -623,8 +656,8 @@ def translate():
 
     except Exception as e:
         print(f"[Translate API] Lỗi: {e}")
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
 # ==========================================================
 # PHẦN 8: LỊCH SỬ DỊCH (KIỂM TRA QUYỀN CHÍNH XÁC & GIỚI HẠN 100 LƯỢT)
 # ==========================================================

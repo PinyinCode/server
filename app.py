@@ -548,7 +548,7 @@ def translate():
             quota = 999999999
             used = 0
         elif role == 'admin':
-            quota = 100000
+            quota = 20000
             today_str = datetime.utcnow().strftime('%Y-%m-%d')
             last_reset = user_data.get('lastTokenResetDate', '')
             used = user_data.get('tokensUsed', 0)
@@ -557,13 +557,13 @@ def translate():
                 user_ref.update({
                     'tokensUsed': 0,
                     'lastTokenResetDate': today_str,
-                    'tokenQuota': 100000
+                    'tokenQuota': 20000
                 })
         elif role in ['trial', 'demo', 'user'] and is_expired:
             quota = 0
             used = user_data.get('tokensUsed', 0)
         else:
-            quota = user_data.get('tokenQuota', 20000)
+            quota = user_data.get('tokenQuota', 10000)
             current_month = datetime.utcnow().strftime('%Y-%m')
             last_reset_month = user_data.get('lastTokenResetMonth', '')
             used = user_data.get('tokensUsed', 0)
@@ -573,7 +573,7 @@ def translate():
                 user_ref.update({
                     'tokensUsed': 0,
                     'lastTokenResetMonth': current_month,
-                    'tokenQuota': 20000
+                    'tokenQuota': 10000
                 })
                 
         # ═══════════════════════════════════════════════════════

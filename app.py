@@ -828,6 +828,39 @@ def history_api():
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route('/api/admin/approve-token', methods=['POST', 'OPTIONS'])
+def approve_token():
+    if request.method == 'OPTIONS': return jsonify({}), 200
+    if not FIREBASE_READY: return jsonify({"error": "Firebase chưa cấu hình"}), 503
+    
+    data = request.json or {}
+    admin_email = data.get('admin_email')
+    target_email = data.get('target_email')
+    amount = int(data.get('amount', 0))
+    password = data.get('password') # Pass do Admin nhập từ giao diện
+
+    # ⭐ Lấy Pass bí mật từ Server
+    SERVER_PASS = os.environ.get("APPROVE_PASSWORD", "admin123")
+
+    # ⭐ Kiểm tra Pass
+    if password != SERVER_PASS:
+        return jsonify({"error": "Mật khẩu duyệt không đúng! Thao tác bị từ chối."}), 403
+
+    # Tiến hành cộng token
+    db = firestore.client()
+    user_ref = db.collection('allowed_users').document(target_email)
+    if not user_ref.get().exists:
+        return jsonify({"error": "Tài khoản cần nạp không tồn tại"}), 404
+        
+    user_ref.update({
+        'bonusTokens': firestore.Increment(amount)
+    })
+    
+    # (Tùy chọn) Bạn có thể lưu lại lịch sử ai đã duyệt
+    print(f"[Approve] Admin {admin_email} đã duyệt {amount} token cho {target_email}")
+    
+    return jsonify({"ok": True, "message": f"Đã duyệt thành công {amount} token!"})
+
 @app.route('/health')
 def health():
     return jsonify({

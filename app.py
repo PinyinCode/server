@@ -1017,10 +1017,10 @@ def index():
     return jsonify({'name': 'Mega API 5-in-1', 'version': '7.9-Batch-History', 'status': 'Running'})
 
 # ==========================================================
-# PHẦN 9: API DỊCH ẢNH (QWEN-VL-OCR + QWEN-MT)
+# PHẦN 9: API ĐỌC CHỮ TỪ ẢNH (QWEN-VL-OCR)
 # ==========================================================
 import base64
-import re # ⭐ Thêm thư viện re để đếm ký tự
+import re
 
 @app.route('/api/translate-image', methods=['POST', 'OPTIONS'])
 def translate_image():
@@ -1028,7 +1028,6 @@ def translate_image():
     if not FIREBASE_READY: return jsonify({"error": "Firebase chưa cấu hình"}), 503
     
     email = request.form.get('email')
-    target_lang = request.form.get('target', 'vi')
     
     if not email or 'image' not in request.files:
         return jsonify({"error": "Thiếu dữ liệu (email hoặc ảnh)"}), 400
@@ -1064,7 +1063,7 @@ def translate_image():
             "messages": [{"role": "user", "content": [
                 {
                     "type": "text", 
-                    "text": "Hãy trích xuất CHỈ phần nội dung văn bản chính trong ảnh (như đoạn văn, bài báo, tin nhắn). TUYỆT ĐỐI BỎ QUA các thành phần giao diện như: thanh menu, nút bấm, quảng cáo, logo, tên ứng dụng, thời gian, pin, mạng. Chỉ trả về văn bản chính, không giải thích gì thêm."
+                    "text": "Hãy trích xuất CHỈ phần nội dung văn bản chính trong ảnh. TUYỆT ĐỐI BỎ QUA thanh menu, quảng cáo, logo. Chỉ trả về văn bản, không giải thích."
                 },
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]}]
@@ -1080,54 +1079,28 @@ def translate_image():
         if not extracted_text:
             return jsonify({"error": "Không tìm thấy chữ nào trong ảnh!"}), 400
 
-        # ⭐ 3. TỰ ĐỘNG PHÁT HIỆN NGÔN NGỮ (Đếm ký tự Trung và Việt)
+        # 3. Phát hiện ngôn ngữ gốc của ảnh
         zh_chars = len(re.findall(r'[\u4e00-\u9fa5]', extracted_text))
         vi_chars = len(re.findall(r'[a-zA-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠàáâãèéêìíòóôõùúăđĩũơ]', extracted_text))
         
         detected_source = 'zh' if zh_chars > vi_chars else 'vi'
         
-        # Ghi đè chiều dịch dựa trên ngôn ngữ phát hiện được
-        if detected_source == 'zh':
-            actual_target = 'vi'
-            source_lang_qwen = 'Chinese'
-            target_lang_qwen = 'Vietnamese'
-        else:
-            actual_target = 'zh-CN'
-            source_lang_qwen = 'Vietnamese'
-            target_lang_qwen = 'Chinese'
-
-        # 4. Dịch văn bản bằng Qwen-MT
-        payload_mt = {
-            "model": "qwen-mt-flash",
-            "messages": [{"role": "user", "content": extracted_text}],
-            "translation_options": {"source_lang": source_lang_qwen, "target_lang": target_lang_qwen}
-        }
-        res_mt = requests.post(QWEN_URL, json=payload_mt, headers=headers, timeout=25).json()
-        
-        if 'error' in res_mt:
-            return jsonify({"error": res_mt['error']['message']}), 500
-            
-        translated_text = res_mt['choices'][0]['message']['content']
-        tokens_mt = res_mt.get('usage', {}).get('total_tokens', 0)
-        
-        total_tokens_used = tokens_ocr + tokens_mt
-        
-        # 5. Trừ token
-        if role not in ['admin', 'super_admin'] and total_tokens_used > 0:
+        # 4. Trừ token của bước OCR trên Firestore
+        if role not in ['admin', 'super_admin'] and tokens_ocr > 0:
             user_ref.update({
-                'tokensUsed': firestore.Increment(total_tokens_used),
+                'tokensUsed': firestore.Increment(tokens_ocr),
                 'lastTokenUsedAt': firestore.SERVER_TIMESTAMP
             })
             
-        # 6. Trả kết quả về (bao gồm cả ngôn ngữ phát hiện được)
+        # 5. Trả về văn bản gốc, số token đã dùng và ngôn ngữ phát hiện được
         return jsonify({
-            "translated": translated_text,
-            "tokensUsed": total_tokens_used,
-            "detected_source": detected_source # ⭐ Trả về 'zh' hoặc 'vi'
+            "original_text": extracted_text,
+            "tokensUsed": tokens_ocr,
+            "detected_source": detected_source
         })
 
     except Exception as e:
-        print(f"[Translate Image API] Lỗi: {e}")
+        print(f"[OCR Image API] Lỗi: {e}")
         return jsonify({"error": str(e)}), 500
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

@@ -1017,7 +1017,7 @@ def index():
     return jsonify({'name': 'Mega API 5-in-1', 'version': '7.9-Batch-History', 'status': 'Running'})
 
 # ==========================================================
-# PHẦN 9: API ĐỌC CHỮ TỪ ẢNH (QWEN-VL-OCR) - ĐÃ ĐỒNG BỘ TOKEN & BẢO MẬT
+# PHẦN 9: API ĐỌC CHỮ TỪ ẢNH (QWEN-VL-OCR) - ĐÃ TỐI ƯU & ĐỒNG BỘ
 # ==========================================================
 @app.route('/api/translate-image', methods=['POST', 'OPTIONS'])
 def translate_image():
@@ -1064,7 +1064,7 @@ def translate_image():
             except: 
                 pass
 
-        # 1. TÍNH QUOTA VÀ RESET ĐỊNH KỲ (Đồng bộ chuẩn như Phần 7)
+        # 1. Tính quota và reset định kỳ (Đồng bộ chuẩn giờ VN)
         now_vn = datetime.utcnow() + timedelta(hours=7)
 
         if role == 'super_admin':
@@ -1099,7 +1099,7 @@ def translate_image():
                     'tokenQuota': 10000
                 })
 
-        # 2. KIỂM TRA HẠN VÀ TỔNG TOKEN KHẢ DỤNG
+        # 2. Kiểm tra hạn và tổng token khả dụng
         if role != 'super_admin' and is_expired:
             return jsonify({"error": "Tài khoản của bạn đã hết hạn, vui lòng gia hạn để tiếp tục dịch ảnh!"}), 403
 
@@ -1112,7 +1112,7 @@ def translate_image():
 
         headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
         
-        # 3. GỌI MÔ HÌNH QWEN-VL-OCR ĐỂ TRÍCH XUẤT VĂN BẢN
+        # 3. Gọi mô hình Qwen-VL-OCR trích xuất văn bản
         payload_ocr = {
             "model": "qwen-vl-ocr",
             "messages": [{"role": "user", "content": [
@@ -1134,12 +1134,12 @@ def translate_image():
         if not extracted_text:
             return jsonify({"error": "Không tìm thấy chữ nào trong ảnh!"}), 400
 
-        # 4. PHÁT HIỆN NGÔN NGỮ GỐC
+        # 4. Phát hiện ngôn ngữ gốc
         zh_chars = len(re.findall(r'[\u4e00-\u9fa5]', extracted_text))
         vi_chars = len(re.findall(r'[a-zA-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠàáâãèéêìíòóôõùúăđĩũơ]', extracted_text))
         detected_source = 'zh' if zh_chars > vi_chars else 'vi'
         
-        # 5. TRỪ TOKEN CHUẨN XÁC (Ưu tiên trừ bonusTokens trước, sau đó mới trừ quota tháng)
+        # 5. Trừ token chuẩn xác (Ưu tiên trừ bonusTokens trước, sau đó mới trừ quota tháng)
         if role != 'super_admin' and tokens_ocr > 0:
             bonus_to_deduct = min(bonus, tokens_ocr)
             remaining_to_deduct = tokens_ocr - bonus_to_deduct
@@ -1164,6 +1164,7 @@ def translate_image():
         print(f"[OCR Image API] Lỗi: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

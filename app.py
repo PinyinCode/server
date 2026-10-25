@@ -920,6 +920,50 @@ def check_token():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+@app.route('/api/history/delete', methods=['POST', 'OPTIONS'])
+def history_delete():
+    if request.method == 'OPTIONS': return jsonify({}), 200
+    if not FIREBASE_READY: return jsonify({"ok": False, "error": "Firebase chưa cấu hình"}), 503
+    
+    data = request.json or {}
+    email = data.get('email')
+    doc_id = data.get('id')
+    
+    if not email or not doc_id:
+        return jsonify({"ok": False, "error": "Thiếu email hoặc id"}), 400
+        
+    try:
+        db = firestore.client()
+        history_ref = db.collection('translation_history')
+        doc_ref = history_ref.document(doc_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            return jsonify({"ok": False, "error": "Không tìm thấy lịch sử này"}), 404
+            
+        # Kiểm tra bảo mật: Chỉ người tạo mới được xoá
+        if doc.to_dict().get('email') != email.strip().lower():
+            return jsonify({"ok": False, "error": "Không có quyền xoá"}), 403
+            
+        doc_ref.delete()
+        
+        # Đếm lại số câu đã lưu trong ngày hôm nay để trả về cho Client cập nhật
+        now_vn = datetime.utcnow() + timedelta(hours=7)
+        today_start = now_vn.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        all_docs = list(history_ref.where('email', '==', email.strip().lower()).stream())
+        today_count = 0
+        for d in all_docs:
+            ca = d.to_dict().get('createdAt')
+            if ca and hasattr(ca, 'replace'):
+                if ca.replace(tzinfo=None) >= today_start:
+                    today_count += 1
+                    
+        return jsonify({"ok": True, "todayCount": today_count})
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)}), 500
 @app.route('/api/admin/approve-token', methods=['POST', 'OPTIONS'])
 def approve_token():
     if request.method == 'OPTIONS': return jsonify({}), 200

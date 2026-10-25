@@ -1061,7 +1061,10 @@ def translate_image():
         payload_ocr = {
             "model": "qwen-vl-ocr",
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Trích xuất toàn bộ văn bản trong ảnh này. Chỉ trả về văn bản, không giải thích."},
+                {
+                    "type": "text", 
+                    "text": "Hãy trích xuất CHỈ phần nội dung văn bản chính trong ảnh (như đoạn văn, bài báo, tin nhắn). TUYỆT ĐỐI BỎ QUA các thành phần giao diện như: thanh menu, nút bấm, quảng cáo, logo, tên ứng dụng, thời gian, pin, mạng. Chỉ trả về văn bản chính, không giải thích gì thêm."
+                },
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]}]
         }

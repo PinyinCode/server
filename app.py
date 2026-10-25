@@ -1016,6 +1016,100 @@ def warmup():
 def index():
     return jsonify({'name': 'Mega API 5-in-1', 'version': '7.9-Batch-History', 'status': 'Running'})
 
+# ==========================================================
+# PHẦN 9: API DỊCH ẢNH (QWEN-VL-OCR + QWEN-MT)
+# ==========================================================
+import base64
+
+@app.route('/api/translate-image', methods=['POST', 'OPTIONS'])
+def translate_image():
+    if request.method == 'OPTIONS': return jsonify({}), 200
+    if not FIREBASE_READY: return jsonify({"error": "Firebase chưa cấu hình"}), 503
+    
+    email = request.form.get('email')
+    target_lang = request.form.get('target', 'vi')
+    
+    if not email or 'image' not in request.files:
+        return jsonify({"error": "Thiếu dữ liệu (email hoặc ảnh)"}), 400
+        
+    file = request.files['image']
+    if file.filename == '': return jsonify({"error": "Chưa chọn file"}), 400
+
+    try:
+        image_data = file.read()
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+        
+        # 1. Kiểm tra Token
+        db = firestore.client()
+        user_ref = db.collection('allowed_users').document(email)
+        user_doc = user_ref.get()
+        if not user_doc.exists: return jsonify({"error": "Tài khoản không tồn tại"}), 404
+            
+        user_data = user_doc.to_dict()
+        role = str(user_data.get('role') or 'user').strip().lower()
+        
+        if role not in ['admin', 'super_admin']:
+            quota = user_data.get('tokenQuota', 20000)
+            bonus = user_data.get('bonusTokens', 0)
+            used = user_data.get('tokensUsed', 0)
+            if used >= (quota + bonus):
+                return jsonify({"error": "Bạn đã hết token, vui lòng nạp thêm!"}), 403
+
+        headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
+        
+        # 2. Đọc chữ bằng Qwen-VL-OCR
+        payload_ocr = {
+            "model": "qwen-vl-ocr",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "Trích xuất toàn bộ văn bản trong ảnh này. Chỉ trả về văn bản, không giải thích."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+            ]}]
+        }
+        res_ocr = requests.post(QWEN_URL, json=payload_ocr, headers=headers, timeout=30).json()
+        
+        if 'error' in res_ocr:
+            return jsonify({"error": res_ocr['error']['message']}), 500
+            
+        extracted_text = res_ocr['choices'][0]['message']['content'].strip()
+        tokens_ocr = res_ocr.get('usage', {}).get('total_tokens', 0)
+
+        if not extracted_text:
+            return jsonify({"error": "Không tìm thấy chữ nào trong ảnh!"}), 400
+
+        # 3. Dịch văn bản bằng Qwen-MT
+        source_lang = 'Chinese' if target_lang == 'vi' else 'Vietnamese'
+        target_lang_mt = 'Vietnamese' if target_lang == 'vi' else 'Chinese'
+        
+        payload_mt = {
+            "model": "qwen-mt-flash",
+            "messages": [{"role": "user", "content": extracted_text}],
+            "translation_options": {"source_lang": source_lang, "target_lang": target_lang_mt}
+        }
+        res_mt = requests.post(QWEN_URL, json=payload_mt, headers=headers, timeout=25).json()
+        
+        if 'error' in res_mt:
+            return jsonify({"error": res_mt['error']['message']}), 500
+            
+        translated_text = res_mt['choices'][0]['message']['content']
+        tokens_mt = res_mt.get('usage', {}).get('total_tokens', 0)
+        
+        total_tokens_used = tokens_ocr + tokens_mt
+        
+        # 4. Trừ token
+        if role not in ['admin', 'super_admin'] and total_tokens_used > 0:
+            user_ref.update({
+                'tokensUsed': firestore.Increment(total_tokens_used),
+                'lastTokenUsedAt': firestore.SERVER_TIMESTAMP
+            })
+            
+        return jsonify({
+            "translated": translated_text,
+            "tokensUsed": total_tokens_used
+        })
+
+    except Exception as e:
+        print(f"[Translate Image API] Lỗi: {e}")
+        return jsonify({"error": str(e)}), 500
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)

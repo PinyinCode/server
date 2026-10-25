@@ -847,7 +847,79 @@ def history_api():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(e)}), 500
+@app.route('/api/user/check-token', methods=['POST', 'OPTIONS'])
+def check_token():
+    if request.method == 'OPTIONS': return jsonify({}), 200
+    if not FIREBASE_READY: return jsonify({"error": "Firebase chưa cấu hình"}), 503
+    
+    data = request.json or {}
+    email = data.get('email')
+    if not email: return jsonify({"error": "Thiếu email"}), 400
 
+    try:
+        db = firestore.client()
+        email_clean = email.strip().lower()
+        user_ref = db.collection('allowed_users').document(email_clean)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists: return jsonify({"error": "Tài khoản không tồn tại"}), 404
+            
+        user_data = user_doc.to_dict()
+        raw_role = user_data.get('role')
+        tier = user_data.get('tier')
+        
+        if email_clean == 'esp32.hotro@gmail.com' or tier == 'active':
+            role = 'active'
+        else:
+            role = str(raw_role or tier or 'trial').strip().lower()
+            
+        expires_at = user_data.get('expiresAt')
+        is_expired = False
+        if expires_at:
+            try:
+                now_vn = datetime.utcnow() + timedelta(hours=7)
+                exp_date = expires_at if hasattr(expires_at, 'strftime') else datetime.strptime(str(expires_at)[:10], '%Y-%m-%d')
+                if now_vn > exp_date: is_expired = True
+            except: pass
+
+        now_vn = datetime.utcnow() + timedelta(hours=7)
+        
+        if role == 'super_admin':
+            quota = 999999999
+            used = 0
+        elif role == 'admin':
+            quota = 20000
+            today_str = now_vn.strftime('%Y-%m-%d')
+            last_reset = user_data.get('lastTokenResetDate', '')
+            used = user_data.get('tokensUsed', 0)
+            if last_reset != today_str:
+                used = 0
+                user_ref.update({'tokensUsed': 0, 'lastTokenResetDate': today_str, 'tokenQuota': 20000})
+        elif role in ['trial', 'demo', 'user'] and is_expired:
+            quota = 0
+            used = user_data.get('tokensUsed', 0)
+        else:
+            quota = user_data.get('tokenQuota', 10000)
+            current_month = now_vn.strftime('%Y-%m')
+            last_reset_month = user_data.get('lastTokenResetMonth', '')
+            used = user_data.get('tokensUsed', 0)
+            if last_reset_month != current_month:
+                used = 0
+                user_ref.update({'tokensUsed': 0, 'lastTokenResetMonth': current_month, 'tokenQuota': 10000})
+                
+        bonus = user_data.get('bonusTokens', 0)
+        
+        return jsonify({
+            "ok": True,
+            "role": role,
+            "quota": quota,
+            "bonus": bonus,
+            "used": used,
+            "lastTokenResetDate": user_data.get('lastTokenResetDate', ''),
+            "lastTokenResetMonth": user_data.get('lastTokenResetMonth', '')
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 @app.route('/api/admin/approve-token', methods=['POST', 'OPTIONS'])
 def approve_token():
     if request.method == 'OPTIONS': return jsonify({}), 200

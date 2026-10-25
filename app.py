@@ -1020,6 +1020,7 @@ def index():
 # PHẦN 9: API DỊCH ẢNH (QWEN-VL-OCR + QWEN-MT)
 # ==========================================================
 import base64
+import re # ⭐ Thêm thư viện re để đếm ký tự
 
 @app.route('/api/translate-image', methods=['POST', 'OPTIONS'])
 def translate_image():
@@ -1079,14 +1080,27 @@ def translate_image():
         if not extracted_text:
             return jsonify({"error": "Không tìm thấy chữ nào trong ảnh!"}), 400
 
-        # 3. Dịch văn bản bằng Qwen-MT
-        source_lang = 'Chinese' if target_lang == 'vi' else 'Vietnamese'
-        target_lang_mt = 'Vietnamese' if target_lang == 'vi' else 'Chinese'
+        # ⭐ 3. TỰ ĐỘNG PHÁT HIỆN NGÔN NGỮ (Đếm ký tự Trung và Việt)
+        zh_chars = len(re.findall(r'[\u4e00-\u9fa5]', extracted_text))
+        vi_chars = len(re.findall(r'[a-zA-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠàáâãèéêìíòóôõùúăđĩũơ]', extracted_text))
         
+        detected_source = 'zh' if zh_chars > vi_chars else 'vi'
+        
+        # Ghi đè chiều dịch dựa trên ngôn ngữ phát hiện được
+        if detected_source == 'zh':
+            actual_target = 'vi'
+            source_lang_qwen = 'Chinese'
+            target_lang_qwen = 'Vietnamese'
+        else:
+            actual_target = 'zh-CN'
+            source_lang_qwen = 'Vietnamese'
+            target_lang_qwen = 'Chinese'
+
+        # 4. Dịch văn bản bằng Qwen-MT
         payload_mt = {
             "model": "qwen-mt-flash",
             "messages": [{"role": "user", "content": extracted_text}],
-            "translation_options": {"source_lang": source_lang, "target_lang": target_lang_mt}
+            "translation_options": {"source_lang": source_lang_qwen, "target_lang": target_lang_qwen}
         }
         res_mt = requests.post(QWEN_URL, json=payload_mt, headers=headers, timeout=25).json()
         
@@ -1098,16 +1112,18 @@ def translate_image():
         
         total_tokens_used = tokens_ocr + tokens_mt
         
-        # 4. Trừ token
+        # 5. Trừ token
         if role not in ['admin', 'super_admin'] and total_tokens_used > 0:
             user_ref.update({
                 'tokensUsed': firestore.Increment(total_tokens_used),
                 'lastTokenUsedAt': firestore.SERVER_TIMESTAMP
             })
             
+        # 6. Trả kết quả về (bao gồm cả ngôn ngữ phát hiện được)
         return jsonify({
             "translated": translated_text,
-            "tokensUsed": total_tokens_used
+            "tokensUsed": total_tokens_used,
+            "detected_source": detected_source # ⭐ Trả về 'zh' hoặc 'vi'
         })
 
     except Exception as e:

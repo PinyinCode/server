@@ -1017,11 +1017,8 @@ def index():
     return jsonify({'name': 'Mega API 5-in-1', 'version': '7.9-Batch-History', 'status': 'Running'})
 
 # ==========================================================
-# PHẦN 9: API ĐỌC CHỮ TỪ ẢNH (QWEN-VL-OCR)
+# PHẦN 9: API ĐỌC CHỮ TỪ ẢNH (QWEN-VL-OCR) - ĐÃ ĐỒNG BỘ TOKEN & BẢO MẬT
 # ==========================================================
-import base64
-import re
-
 @app.route('/api/translate-image', methods=['POST', 'OPTIONS'])
 def translate_image():
     if request.method == 'OPTIONS': return jsonify({}), 200
@@ -1039,25 +1036,83 @@ def translate_image():
         image_data = file.read()
         base64_image = base64.b64encode(image_data).decode('utf-8')
         
-        # 1. Kiểm tra Token
         db = firestore.client()
-        user_ref = db.collection('allowed_users').document(email)
+        email_clean = email.strip().lower()
+        user_ref = db.collection('allowed_users').document(email_clean)
         user_doc = user_ref.get()
-        if not user_doc.exists: return jsonify({"error": "Tài khoản không tồn tại"}), 404
+        
+        if not user_doc.exists: 
+            return jsonify({"error": "Tài khoản không tồn tại"}), 404
             
         user_data = user_doc.to_dict()
-        role = str(user_data.get('role') or 'user').strip().lower()
+        raw_role = user_data.get('role')
+        tier = user_data.get('tier')
         
-        if role not in ['admin', 'super_admin']:
-            quota = user_data.get('tokenQuota', 20000)
-            bonus = user_data.get('bonusTokens', 0)
+        if email_clean == 'esp32.hotro@gmail.com' or tier == 'active':
+            role = 'active'
+        else:
+            role = str(raw_role or tier or 'trial').strip().lower()
+        
+        expires_at = user_data.get('expiresAt')
+        is_expired = False
+        if expires_at:
+            try:
+                now_vn = datetime.utcnow() + timedelta(hours=7)
+                exp_date = expires_at if hasattr(expires_at, 'strftime') else datetime.strptime(str(expires_at)[:10], '%Y-%m-%d')
+                if now_vn > exp_date:
+                    is_expired = True
+            except: 
+                pass
+
+        # 1. TÍNH QUOTA VÀ RESET ĐỊNH KỲ (Đồng bộ chuẩn như Phần 7)
+        now_vn = datetime.utcnow() + timedelta(hours=7)
+
+        if role == 'super_admin':
+            quota = 999999999
+            used = 0
+        elif role == 'admin':
+            quota = 20000
+            today_str = now_vn.strftime('%Y-%m-%d')
+            last_reset = user_data.get('lastTokenResetDate', '')
             used = user_data.get('tokensUsed', 0)
-            if used >= (quota + bonus):
-                return jsonify({"error": "Bạn đã hết token, vui lòng nạp thêm!"}), 403
+            if last_reset != today_str:
+                used = 0
+                user_ref.update({
+                    'tokensUsed': 0,
+                    'lastTokenResetDate': today_str,
+                    'tokenQuota': 20000
+                })
+        elif role in ['trial', 'demo', 'user'] and is_expired:
+            quota = 0
+            used = user_data.get('tokensUsed', 0)
+        else:
+            quota = user_data.get('tokenQuota', 10000)
+            current_month = now_vn.strftime('%Y-%m')
+            last_reset_month = user_data.get('lastTokenResetMonth', '')
+            used = user_data.get('tokensUsed', 0)
+            
+            if last_reset_month != current_month:
+                used = 0
+                user_ref.update({
+                    'tokensUsed': 0,
+                    'lastTokenResetMonth': current_month,
+                    'tokenQuota': 10000
+                })
+
+        # 2. KIỂM TRA HẠN VÀ TỔNG TOKEN KHẢ DỤNG
+        if role != 'super_admin' and is_expired:
+            return jsonify({"error": "Tài khoản của bạn đã hết hạn, vui lòng gia hạn để tiếp tục dịch ảnh!"}), 403
+
+        bonus = user_data.get('bonusTokens', 0)
+        monthly_remain = max(0, quota - used)
+        total_available = monthly_remain + bonus
+        
+        if role != 'super_admin' and total_available <= 0:
+            return jsonify({"error": "Tài khoản của bạn đã hết quota token, vui lòng nạp thêm để dịch ảnh!"}), 403
 
         headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
         
-        # 2. Đọc chữ bằng Qwen-VL-OCR
+        # 3. GỌI MÔ HÌNH QWEN-VL-OCR ĐỂ TRÍCH XUẤT VĂN BẢN
         payload_ocr = {
             "model": "qwen-vl-ocr",
             "messages": [{"role": "user", "content": [
@@ -1079,20 +1134,26 @@ def translate_image():
         if not extracted_text:
             return jsonify({"error": "Không tìm thấy chữ nào trong ảnh!"}), 400
 
-        # 3. Phát hiện ngôn ngữ gốc của ảnh
+        # 4. PHÁT HIỆN NGÔN NGỮ GỐC
         zh_chars = len(re.findall(r'[\u4e00-\u9fa5]', extracted_text))
         vi_chars = len(re.findall(r'[a-zA-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠàáâãèéêìíòóôõùúăđĩũơ]', extracted_text))
-        
         detected_source = 'zh' if zh_chars > vi_chars else 'vi'
         
-        # 4. Trừ token của bước OCR trên Firestore
-        if role not in ['admin', 'super_admin'] and tokens_ocr > 0:
-            user_ref.update({
-                'tokensUsed': firestore.Increment(tokens_ocr),
-                'lastTokenUsedAt': firestore.SERVER_TIMESTAMP
-            })
+        # 5. TRỪ TOKEN CHUẨN XÁC (Ưu tiên trừ bonusTokens trước, sau đó mới trừ quota tháng)
+        if role != 'super_admin' and tokens_ocr > 0:
+            bonus_to_deduct = min(bonus, tokens_ocr)
+            remaining_to_deduct = tokens_ocr - bonus_to_deduct
             
-        # 5. Trả về văn bản gốc, số token đã dùng và ngôn ngữ phát hiện được
+            update_data = {'lastTokenUsedAt': firestore.SERVER_TIMESTAMP}
+            
+            if bonus_to_deduct > 0:
+                update_data['bonusTokens'] = firestore.Increment(-bonus_to_deduct)
+            
+            if remaining_to_deduct > 0:
+                update_data['tokensUsed'] = firestore.Increment(remaining_to_deduct)
+            
+            user_ref.update(update_data)
+            
         return jsonify({
             "original_text": extracted_text,
             "tokensUsed": tokens_ocr,
@@ -1101,7 +1162,9 @@ def translate_image():
 
     except Exception as e:
         print(f"[OCR Image API] Lỗi: {e}")
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)

@@ -2,6 +2,7 @@ flask
 flask-cors
 gunicorn
 pypinyin
+jieba
 firebase-admin
 pymongo
 google-auth

@@ -627,31 +627,41 @@ def translate():
         for ph, original in placeholders.items():
             translated_text = translated_text.replace(ph, original)
 
-        # ==========================================================
-        # ⭐ TỰ ĐỘNG TẠO PINYIN VIẾT LIỀN THEO TỪ GHÉP (DÙNG JIEBA & PYPINYIN)
+                # ==========================================================
+        # ⭐ TỰ ĐỘNG TẠO PINYIN & MẢNG ITEMS THEO TỪ GHÉP (JIEBA & PYPINYIN)
         # ==========================================================
         generated_pinyin = ""
+        translation_items = []
         if target == 'zh-CN' or target == 'zh' or (source == 'vi' and target == 'zh-CN'):
-            # Sử dụng jieba để tách câu tiếng Trung thành các từ ghép có nghĩa
             words = list(jieba.cut(translated_text))
             phrase_pinyins = []
             
             for word in words:
                 if not word.strip():
                     continue
-                # Nếu là dấu câu hoặc khoảng trắng, giữ nguyên
+                # Nếu là dấu câu hoặc khoảng trắng
                 if re.match(r'^[\s。，！？、；：""''「」『』（）《》〈〉【】〔〕.,!?;:\'"()\[\]{}\-~`@#$%^&*+=|\\/<>]+$', word):
                     phrase_pinyins.append(word)
+                    translation_items.append({
+                        "text": word,
+                        "type": "symbol",
+                        "pinyin": ""
+                    })
                     continue
                 
-                # Lấy pinyin cho từng từ ghép và nối liền các âm tiết lại với nhau (VD: yuè + nán -> yuènán)
+                # Lấy pinyin cho từng từ ghép và nối liền các âm tiết trong cùng 1 từ
                 py_res = pinyin(word, style=Style.TONE, heteronym=False)
                 word_py = "".join([item[0] for item in py_res if item and item[0]])
                 if word_py:
                     phrase_pinyins.append(word_py)
+                    translation_items.append({
+                        "text": word,
+                        "type": "phrase" if len(word) > 1 else "single",
+                        "pinyin": word_py
+                    })
             
-            # Dùng " ".join để các từ ghép cách nhau bằng khoảng trắng chuẩn xác gửi về Client
             generated_pinyin = " ".join(phrase_pinyins)
+
                 
         # ═══════════════════════════════════════════════════════
         # 4. TRỪ TOKEN (ƯU TIÊN BONUS TRƯỚC, SAU ĐÓ MỚI QUOTA THÁNG)

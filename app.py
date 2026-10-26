@@ -811,8 +811,9 @@ def history_api():
             vi = data.get('text_vi', '')
             zh = data.get('text_zh', '')
             pinyin_str = data.get('pinyin', '')
+            items_res = data.get('items', None)
             if vi or zh:
-                items = [{'vi': vi, 'zh': zh, 'pinyin': pinyin_str}]
+                items = [{'vi': vi, 'zh': zh, 'pinyin': pinyin_str, 'items': items_res}]
             else:
                 return jsonify({"ok": False, "error": "Thiếu dữ liệu items"}), 400
                 
@@ -841,6 +842,7 @@ def history_api():
             items_to_save = items
         
         for item in items_to_save:
+            # ⭐ Lưu thêm trường "items" (mảng phân đoạn jieba) vào Firestore lịch sử
             history_ref.add({
                 'email': email_clean,
                 'stt': item.get('stt', ''),
@@ -848,6 +850,7 @@ def history_api():
                 'text_vi': item.get('vi') or item.get('text_vi', ''),
                 'text_zh': item.get('zh') or item.get('text_zh', ''),
                 'pinyin': item.get('pinyin', ''),
+                'items': item.get('items', None), 
                 'createdAt': firestore.SERVER_TIMESTAMP
             })
             

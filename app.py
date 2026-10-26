@@ -627,7 +627,7 @@ def translate():
         for ph, original in placeholders.items():
             translated_text = translated_text.replace(ph, original)
 
-                # ==========================================================
+        # ==========================================================
         # ⭐ TỰ ĐỘNG TẠO PINYIN & MẢNG ITEMS THEO TỪ GHÉP (JIEBA & PYPINYIN)
         # ==========================================================
         generated_pinyin = ""
@@ -661,7 +661,6 @@ def translate():
                     })
             
             generated_pinyin = " ".join(phrase_pinyins)
-
                 
         # ═══════════════════════════════════════════════════════
         # 4. TRỪ TOKEN (ƯU TIÊN BONUS TRƯỚC, SAU ĐÓ MỚI QUOTA THÁNG)
@@ -684,7 +683,8 @@ def translate():
             
         return jsonify({
             "translated": translated_text,
-            "pinyin": generated_pinyin, # ⭐ Trả về chuỗi Pinyin chuẩn viết liền theo từ ghép
+            "pinyin": generated_pinyin,
+            "items": translation_items, # ⭐ ĐÃ THÊM MẢNG ITEMS ĐỂ TRẢ VỀ FRONTEND CHUẨN XÁC
             "tokensUsed": tokens_used
         })
 
@@ -692,6 +692,7 @@ def translate():
         print(f"[Translate API] Lỗi: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 # ==========================================================
 # PHẦN 8: LỊCH SỬ DỊCH (KIỂM TRA QUYỀN & GIỚI HẠN ĐỌC 250 / GHI 150)

@@ -6,6 +6,7 @@ MEGA API 5-IN-1 (BẢN HOÀN CHỈNH - PHÂN QUYỀN TOKEN, LỊCH SỬ 100 CÂU
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from pypinyin import pinyin, Style
+import jieba
 
 import os
 import sys
@@ -546,7 +547,6 @@ def translate():
         # ═══════════════════════════════════════════════════════
         # 1. TÍNH QUOTA VÀ RESET ĐỊNH KỲ
         # ═══════════════════════════════════════════════════════
-        # ⭐ Tạo biến thời gian chuẩn VN dùng chung
         now_vn = datetime.utcnow() + timedelta(hours=7)
 
         if role == 'super_admin':
@@ -554,7 +554,7 @@ def translate():
             used = 0
         elif role == 'admin':
             quota = 20000
-            today_str = now_vn.strftime('%Y-%m-%d') # Sửa thành giờ VN
+            today_str = now_vn.strftime('%Y-%m-%d')
             last_reset = user_data.get('lastTokenResetDate', '')
             used = user_data.get('tokensUsed', 0)
             if last_reset != today_str:
@@ -569,7 +569,7 @@ def translate():
             used = user_data.get('tokensUsed', 0)
         else:
             quota = user_data.get('tokenQuota', 10000)
-            current_month = now_vn.strftime('%Y-%m') # Sửa thành giờ VN
+            current_month = now_vn.strftime('%Y-%m')
             last_reset_month = user_data.get('lastTokenResetMonth', '')
             used = user_data.get('tokensUsed', 0)
             
@@ -627,6 +627,32 @@ def translate():
         for ph, original in placeholders.items():
             translated_text = translated_text.replace(ph, original)
 
+        # ==========================================================
+        # ⭐ TỰ ĐỘNG TẠO PINYIN VIẾT LIỀN THEO TỪ GHÉP (DÙNG JIEBA & PYPINYIN)
+        # ==========================================================
+        generated_pinyin = ""
+        if target == 'zh-CN' or target == 'zh' or (source == 'vi' and target == 'zh-CN'):
+            # Sử dụng jieba để tách câu tiếng Trung thành các từ ghép có nghĩa
+            words = jieba.cut(translated_text)
+            phrase_pinyins = []
+            
+            for word in words:
+                if not word.strip():
+                    continue
+                # Nếu là dấu câu hoặc khoảng trắng, giữ nguyên
+                if re.match(r'^[\s。，！？、；：""''「」『』（）《》〈〉【】〔〕.,!?;:\'"()\[\]{}\-~`@#$%^&*+=|\\/<>]+$', word):
+                    phrase_pinyins.append(word)
+                    continue
+                
+                # Lấy pinyin cho từng từ ghép và nối liền các âm tiết lại với nhau (VD: yuè + nán -> yuènán)
+                py_res = pinyin(word, style=Style.TONE, heteronym=False)
+                word_py = "".join([item[0] for item in py_res if item and item[0]])
+                if word_py:
+                    phrase_pinyins.append(word_py)
+            
+            # Ghép các từ lại bằng khoảng trắng để Client phân tách chính xác tuyệt đối
+            generated_pinyin = " ".join(phrase_pinyins)
+
         # ═══════════════════════════════════════════════════════
         # 4. TRỪ TOKEN (ƯU TIÊN BONUS TRƯỚC, SAU ĐÓ MỚI QUOTA THÁNG)
         # ═══════════════════════════════════════════════════════
@@ -646,12 +672,9 @@ def translate():
             
             user_ref.update(update_data)
             
-            print(f"[Translate] Token dùng: {tokens_used} | "
-                  f"Trừ bonus: {bonus_to_deduct} | "
-                  f"Trừ quota: {remaining_to_deduct}")
-            
         return jsonify({
             "translated": translated_text,
+            "pinyin": generated_pinyin, # ⭐ Trả về chuỗi Pinyin chuẩn viết liền theo từ ghép
             "tokensUsed": tokens_used
         })
 
@@ -683,7 +706,6 @@ def history_api():
     history_ref = db.collection('translation_history')
     user_ref = db.collection('allowed_users').document(email_clean)
     
-    # ⭐ KIỂM TRA QUYỀN CHÍNH XÁC TỪ FIRESTORE
     user_doc = user_ref.get()
     user_role = 'user'
     
@@ -694,10 +716,8 @@ def history_api():
     is_admin = (user_role in ['admin', 'super_admin', 'super-admin'])
     is_get_request = (request.method == 'GET') or (str(data.get('_method', '')).upper() == 'GET')
     
-    # ⭐ XỬ LÝ LẤY LỊCH SỬ (GET)
     if is_get_request:
         try:
-            # ⭐ Sử dụng giờ VN (GMT+7)
             now_vn = datetime.utcnow() + timedelta(hours=7)
             today_str = now_vn.strftime('%Y-%m-%d')
             
@@ -708,7 +728,6 @@ def history_api():
             if last_read_date != today_str:
                 read_count = 0
                 
-            # ⭐ Chặn nếu user đã hết 250 lượt đọc trong ngày
             if not is_admin and read_count >= 250:
                 return jsonify({
                     "ok": False, 
@@ -738,8 +757,6 @@ def history_api():
                 d['createdAt'] = d['createdAtStr']
                 history_list.append(d)
             
-            # ⭐ SẮP XẾP THÔNG MINH (Đã sửa lỗi thụt lề)
-            # 1. Tìm thời gian mới nhất của từng nhóm (groupId)
             group_latest_times = {}
             for d in history_list:
                 gid = str(d.get('groupId', 'unknown'))
@@ -747,15 +764,11 @@ def history_api():
                 if gid not in group_latest_times or t > group_latest_times[gid]:
                     group_latest_times[gid] = t
             
-            # 2. Hàm sắp xếp: Ưu tiên nhóm mới nhất, sau đó đến STT tăng dần
             def smart_sort_key(d):
                 gid = str(d.get('groupId', 'unknown'))
                 group_time = group_latest_times.get(gid, 0)
-                
                 stt_str = str(d.get('stt', ''))
                 stt_num = int(stt_str) if stt_str.isdigit() else 9999
-                
-                # Dấu âm (-) ở group_time để sắp xếp nhóm mới nhất lên đầu
                 return (-group_time, stt_num)
                 
             history_list.sort(key=smart_sort_key)
@@ -767,12 +780,11 @@ def history_api():
                     'lastReadDate': today_str
                 }, merge=True)
             
-            # ⭐ Tính số lượt đọc còn lại dựa trên mốc 250
             read_remain = 999999 if is_admin else (250 - read_count)
             
             return jsonify({
                 "ok": True, 
-                "history": history_list[:150], # ⭐ Trả về tối đa 150 câu để khớp với giới hạn lưu
+                "history": history_list[:150],
                 "todayCount": today_saved_count,
                 "readToday": read_count,
                 "readRemain": read_remain,
@@ -783,7 +795,6 @@ def history_api():
             traceback.print_exc()
             return jsonify({"ok": False, "error": str(e)}), 500
 
-    # ⭐ XỬ LÝ LƯU LỊCH SỬ (POST)
     try:
         items = data.get('items')
         if not items:
@@ -800,7 +811,6 @@ def history_api():
             
         all_docs = list(history_ref.where('email', '==', email_clean).stream())
         
-        # ⭐ Sử dụng giờ VN (GMT+7) để xác định "hôm nay"
         now_vn = datetime.utcnow() + timedelta(hours=7)
         today_start = now_vn.replace(hour=0, minute=0, second=0, microsecond=0)
         today_saved_count = 0
@@ -812,7 +822,6 @@ def history_api():
                 if ca.replace(tzinfo=None) >= today_start:
                     today_saved_count += 1
 
-        # ⭐ Kiểm tra giới hạn lưu 150 câu/ngày
         if not is_admin:
             remaining_quota_today = 150 - today_saved_count
             if remaining_quota_today <= 0:
@@ -824,15 +833,14 @@ def history_api():
         for item in items_to_save:
             history_ref.add({
                 'email': email_clean,
-                'stt': item.get('stt', ''),         # ⭐ Lưu STT
-                'groupId': item.get('groupId', ''), # ⭐ Lưu Group ID
+                'stt': item.get('stt', ''),
+                'groupId': item.get('groupId', ''),
                 'text_vi': item.get('vi') or item.get('text_vi', ''),
                 'text_zh': item.get('zh') or item.get('text_zh', ''),
                 'pinyin': item.get('pinyin', ''),
                 'createdAt': firestore.SERVER_TIMESTAMP
             })
             
-        # Giới hạn số câu lưu trữ tối đa trong Firestore
         if len(all_docs) >= 150:
             def get_doc_time(doc):
                 ca = doc.to_dict().get('createdAt')
@@ -847,6 +855,7 @@ def history_api():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.route('/api/user/check-token', methods=['POST', 'OPTIONS'])
 def check_token():
     if request.method == 'OPTIONS': return jsonify({}), 200
@@ -920,6 +929,7 @@ def check_token():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 @app.route('/api/history/delete', methods=['POST', 'OPTIONS'])
 def history_delete():
     if request.method == 'OPTIONS': return jsonify({}), 200
@@ -941,13 +951,11 @@ def history_delete():
         if not doc.exists:
             return jsonify({"ok": False, "error": "Không tìm thấy lịch sử này"}), 404
             
-        # Kiểm tra bảo mật: Chỉ người tạo mới được xoá
         if doc.to_dict().get('email') != email.strip().lower():
             return jsonify({"ok": False, "error": "Không có quyền xoá"}), 403
             
         doc_ref.delete()
         
-        # Đếm lại số câu đã lưu trong ngày hôm nay để trả về cho Client cập nhật
         now_vn = datetime.utcnow() + timedelta(hours=7)
         today_start = now_vn.replace(hour=0, minute=0, second=0, microsecond=0)
         
@@ -964,6 +972,7 @@ def history_delete():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.route('/api/admin/approve-token', methods=['POST', 'OPTIONS'])
 def approve_token():
     if request.method == 'OPTIONS': return jsonify({}), 200
@@ -973,16 +982,13 @@ def approve_token():
     admin_email = data.get('admin_email')
     target_email = data.get('target_email')
     amount = int(data.get('amount', 0))
-    password = data.get('password') # Pass do Admin nhập từ giao diện
+    password = data.get('password')
 
-    # ⭐ Lấy Pass bí mật từ Server
     SERVER_PASS = os.environ.get("APPROVE_PASSWORD", "admin123")
 
-    # ⭐ Kiểm tra Pass
     if password != SERVER_PASS:
         return jsonify({"error": "Mật khẩu duyệt không đúng! Thao tác bị từ chối."}), 403
 
-    # Tiến hành cộng token
     db = firestore.client()
     user_ref = db.collection('allowed_users').document(target_email)
     if not user_ref.get().exists:
@@ -991,9 +997,6 @@ def approve_token():
     user_ref.update({
         'bonusTokens': firestore.Increment(amount)
     })
-    
-    # (Tùy chọn) Bạn có thể lưu lại lịch sử ai đã duyệt
-    print(f"[Approve] Admin {admin_email} đã duyệt {amount} token cho {target_email}")
     
     return jsonify({"ok": True, "message": f"Đã duyệt thành công {amount} token!"})
 
@@ -1064,7 +1067,6 @@ def translate_image():
             except: 
                 pass
 
-        # 1. Tính quota và reset định kỳ (Đồng bộ chuẩn giờ VN)
         now_vn = datetime.utcnow() + timedelta(hours=7)
 
         if role == 'super_admin':
@@ -1099,7 +1101,6 @@ def translate_image():
                     'tokenQuota': 10000
                 })
 
-        # 2. Kiểm tra hạn và tổng token khả dụng
         if role != 'super_admin' and is_expired:
             return jsonify({"error": "Tài khoản của bạn đã hết hạn, vui lòng gia hạn để tiếp tục dịch ảnh!"}), 403
 
@@ -1112,7 +1113,6 @@ def translate_image():
 
         headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
         
-        # 3. Gọi mô hình Qwen-VL-OCR trích xuất văn bản
         payload_ocr = {
             "model": "qwen-vl-ocr",
             "messages": [{"role": "user", "content": [
@@ -1134,12 +1134,10 @@ def translate_image():
         if not extracted_text:
             return jsonify({"error": "Không tìm thấy chữ nào trong ảnh!"}), 400
 
-        # 4. Phát hiện ngôn ngữ gốc
         zh_chars = len(re.findall(r'[\u4e00-\u9fa5]', extracted_text))
         vi_chars = len(re.findall(r'[a-zA-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠàáâãèéêìíòóôõùúăđĩũơ]', extracted_text))
         detected_source = 'zh' if zh_chars > vi_chars else 'vi'
         
-        # 5. Trừ token chuẩn xác (Ưu tiên trừ bonusTokens trước, sau đó mới trừ quota tháng)
         if role != 'super_admin' and tokens_ocr > 0:
             bonus_to_deduct = min(bonus, tokens_ocr)
             remaining_to_deduct = tokens_ocr - bonus_to_deduct
@@ -1164,8 +1162,6 @@ def translate_image():
         print(f"[OCR Image API] Lỗi: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
-
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

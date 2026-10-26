@@ -630,10 +630,11 @@ def translate():
         # ==========================================================
         # ⭐ TỰ ĐỘNG TẠO PINYIN VIẾT LIỀN THEO TỪ GHÉP (DÙNG JIEBA & PYPINYIN)
         # ==========================================================
+                # ⭐ ĐOẠN CODE CHUẨN XÁC VÀ GỌN GÀNG (DÙNG THAY THẾ)
         generated_pinyin = ""
         if target == 'zh-CN' or target == 'zh' or (source == 'vi' and target == 'zh-CN'):
             # Sử dụng jieba để tách câu tiếng Trung thành các từ ghép có nghĩa
-            words = jieba.cut(translated_text)
+            words = list(jieba.cut(translated_text))
             phrase_pinyins = []
             
             for word in words:
@@ -650,9 +651,10 @@ def translate():
                 if word_py:
                     phrase_pinyins.append(word_py)
             
-            # Ghép các từ lại bằng khoảng trắng để Client phân tách chính xác tuyệt đối
+            # Dùng " ".join để các từ ghép cách nhau bằng khoảng trắng chuẩn xác gửi về Client
             generated_pinyin = " ".join(phrase_pinyins)
 
+                
         # ═══════════════════════════════════════════════════════
         # 4. TRỪ TOKEN (ƯU TIÊN BONUS TRƯỚC, SAU ĐÓ MỚI QUOTA THÁNG)
         # ═══════════════════════════════════════════════════════
